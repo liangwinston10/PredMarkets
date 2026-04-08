@@ -7,12 +7,16 @@ and fetches recent stats from the Sackmann dataset.
 import json
 import math
 import io
+import os
 import sys
+import pathlib
 import datetime
 import collections
 import difflib
 import warnings
 from typing import Optional
+
+from sizing import size_bet, DAILY_CAP_BY_ROUND
 
 # Ensure UTF-8 output on Windows so box-drawing characters render correctly
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -389,7 +393,7 @@ def predict(p1_name, p2_name, surface, best_of, market_p1,
 
 # ── Display ───────────────────────────────────────────────────────────────────
 
-def display(p1_name, p2_name, surface, best_of, result, market_p1):
+def display(p1_name, p2_name, surface, best_of, result, market_p1, sizing=None):
     W = 54
     comp1 = result["comp_p1"];  comp2 = 1 - comp1
     elo1  = result["elo_p1"];   elo2  = 1 - elo1
@@ -438,6 +442,20 @@ def display(p1_name, p2_name, surface, best_of, result, market_p1):
             signal = f"➖ Model and market roughly agree"
         lines.append(f"║  {'Edge vs market':<22} {edge_str:<{W-26}}║")
         lines.append(f"║  {'Signal':<22} {signal:<{W-26}}║")
+        lines.append(f"╠{'═'*W}╣")
+
+    if sizing is not None:
+        sig = sizing["signal"]
+        if sig == "BET":
+            sig_str = f"BET  ${sizing['stake']:.2f}  ({sizing['stake_pct']:.1%} bankroll)"
+        elif sig == "CAP_BOUND":
+            sig_str = "CAP BOUND — daily limit reached"
+        else:
+            sig_str = f"NO EDGE  ({sizing['edge']*100:+.1f}pp)"
+        lines.append(f"║  {'Sizing signal':<22} {sig_str:<{W-26}}║")
+        if sig == "BET":
+            cap_str = f"edge cap {sizing['edge_cap']:.1%}  |  headroom {sizing['remaining_capacity']:.1%}"
+            lines.append(f"║  {'':22} {cap_str:<{W-26}}║")
         lines.append(f"╠{'═'*W}╣")
 
     comp_label = f"  Component breakdown:"
@@ -498,6 +516,30 @@ def load_recent_data():
     df = df[df["tourney_date"] <= CUTOFF_DATE]
     print(f"  Using matches up to {CUTOFF_DATE.date()} ({len(df):,} total)")
     return df
+
+
+# ── Session state (bankroll + exposure tracking) ──────────────────────────────
+
+_SESSION_DIR = pathlib.Path(".tmp")
+_VALID_ROUNDS = ("R128", "R64", "R32", "R16", "QF", "SF", "F")
+
+
+def _session_path() -> pathlib.Path:
+    return _SESSION_DIR / f"session_{datetime.date.today()}.json"
+
+
+def _load_session() -> dict | None:
+    p = _session_path()
+    if p.exists():
+        with open(p) as f:
+            return json.load(f)
+    return None
+
+
+def _save_session(data: dict):
+    _SESSION_DIR.mkdir(exist_ok=True)
+    with open(_session_path(), "w") as f:
+        json.dump(data, f, indent=2)
 
 
 # ── Main CLI ──────────────────────────────────────────────────────────────────
@@ -580,6 +622,32 @@ def main():
 
     today = pd.Timestamp.now()
 
+    # ── Session setup ──────────────────────────────────────────────────────────
+    session = _load_session()
+    if session:
+        bankroll         = session["bankroll"]
+        current_exposure = session["current_exposure"]
+        print(f"\nResuming today's session — bankroll ${bankroll:,.2f}, "
+              f"exposure {current_exposure:.1%} ({len(session['bets'])} bet(s) placed).")
+    else:
+        print()
+        br_raw = input("Bankroll for today's session (Kalshi cash + EV of open positions, $): ").strip()
+        try:
+            bankroll = float(br_raw)
+            if bankroll <= 0:
+                raise ValueError
+        except ValueError:
+            bankroll = 0.0
+            print("  Invalid bankroll — sizing will be skipped.")
+        current_exposure = 0.0
+        session = {
+            "date": str(datetime.date.today()),
+            "bankroll": bankroll,
+            "bets": [],
+            "current_exposure": 0.0,
+        }
+        _save_session(session)
+
     while True:
         print("─" * 56)
         p1_raw = input("Player 1 name: ").strip()
@@ -614,12 +682,45 @@ def main():
                 print("  Invalid market probability, skipping.")
                 market_p1 = None
 
+        round_raw = input(f"Round [{'/'.join(_VALID_ROUNDS)}]: ").strip().upper()
+        if round_raw not in _VALID_ROUNDS:
+            round_raw = "R32"
+            print("  Unrecognized round, defaulting to R32.")
+
         result = predict(
             p1_name, p2_name, surface_raw, best_of, market_p1,
             elo_ratings, surf_elo_by_name, rank_pts_map, get_stats, last_date, h2h_map, today
         )
 
-        display(p1_name, p2_name, surface_raw, best_of, result, market_p1)
+        sizing = None
+        if bankroll > 0 and market_p1 is not None:
+            sizing = size_bet(
+                p_model=result["comp_p1"],
+                p_market=market_p1,
+                bankroll=bankroll,
+                current_exposure=current_exposure,
+                round_stage=round_raw,
+            )
+
+        display(p1_name, p2_name, surface_raw, best_of, result, market_p1, sizing)
+
+        if sizing and sizing["signal"] == "BET":
+            confirm = input(f"  Place this bet (${sizing['stake']:.2f} on {p1_name})? [y/n]: ").strip().lower()
+            if confirm == "y":
+                current_exposure += sizing["stake_pct"]
+                session["current_exposure"] = current_exposure
+                session["bets"].append({
+                    "match": f"{p1_name} vs {p2_name}",
+                    "round": round_raw,
+                    "stake": sizing["stake"],
+                    "stake_pct": sizing["stake_pct"],
+                    "edge": round(sizing["edge"], 4),
+                    "placed": True,
+                })
+                _save_session(session)
+                print(f"  Logged. Cumulative exposure: {current_exposure:.1%} "
+                      f"/ {sizing['daily_cap']:.0%} daily cap "
+                      f"({sizing['remaining_capacity'] - sizing['stake_pct']:.1%} remaining).")
 
         again = input("Run another match? [y/n]: ").strip().lower()
         if again != "y":
