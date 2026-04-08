@@ -47,6 +47,26 @@ def get_wta_engine_and_stats():
     return engine, stats
 
 
+@st.cache_resource(ttl=3600, show_spinner="Loading recent match form data...")
+def _prewarm_form_cache():
+    """Load ESPN 90-day cache once per process. fetch_recent_form() hits module-level cache after."""
+    from tools.player_form import _load_cache
+    _load_cache()
+
+
+def _form_blend_dash(comp_p1: float, form1, form2):
+    """80/20 blend of composite toward recent win-rate ratio. Returns None if form unavailable."""
+    if form1 is None or form2 is None:
+        return None
+    wr1 = form1.get("win_rate_30d") if form1.get("n_30d", 0) >= 3 else form1.get("win_rate_60d")
+    wr2 = form2.get("win_rate_30d") if form2.get("n_30d", 0) >= 3 else form2.get("win_rate_60d")
+    if wr1 is None or wr2 is None:
+        return None
+    c1 = max(0.10, min(0.90, wr1))
+    c2 = max(0.10, min(0.90, wr2))
+    return max(0.001, min(0.999, 0.80 * comp_p1 + 0.20 * (c1 / (c1 + c2))))
+
+
 # ── Live tournament banner ─────────────────────────────────────────────────────
 live_now = get_live_tournaments()
 if live_now:
@@ -243,6 +263,10 @@ with tab2:
             )
             st.session_state["bankroll"] = bankroll
 
+            # ── Pre-warm ESPN form cache (3s first time, instant after) ──────────
+            from tools.player_form import fetch_recent_form as _fetch_form
+            _prewarm_form_cache()
+
             # ── Build edge rows ────────────────────────────────────────────────
             edge_rows   = []
             sizing_feed = []   # for size_day()
@@ -285,13 +309,17 @@ with tab2:
                 eng = wta_eng if wta else atp_eng
                 sts = wta_sts if wta else atp_sts
 
-                comp_val     = None
-                edge_val     = None
-                model_str    = "—"
-                edge_str     = "—"
-                sim_str      = "—"
-                sim_edge_str = "—"
-                signal       = "—"
+                comp_val         = None
+                edge_val         = None
+                model_str        = "—"
+                edge_str         = "—"
+                sim_str          = "—"
+                sim_edge_str     = "—"
+                form_adj_str     = "—"
+                form_adj_edge_str = "—"
+                signal           = "—"
+                _form_fav        = None
+                _form_dog        = None
 
                 if eng and sts and mkt_prob is not None:
                     known = sts.get("known_players", [])
@@ -309,6 +337,15 @@ with tab2:
                             sim_str   = f"{sim_val*100:.1f}%" if sim_val is not None else "—"
                             edge_str  = f"{edge_val*100:+.1f}%"
                             sim_edge_str = f"{sim_edge*100:+.1f}%" if sim_edge is not None else "—"
+
+                            # Form adjustment (ESPN velocity, 20% weight)
+                            _form_fav = _fetch_form(p1)
+                            _form_dog = _fetch_form(p2)
+                            _fadj_val = _form_blend_dash(comp_val, _form_fav, _form_dog)
+                            if _fadj_val is not None:
+                                form_adj_str = f"{_fadj_val*100:.1f}%"
+                                form_adj_edge_str = f"{(_fadj_val - mkt_prob)*100:+.1f}%"
+
                             signal    = "VALUE" if abs(edge_val) >= 0.04 else "~"
                             if edge_val is not None and edge_val >= 0.04:
                                 sizing_feed.append({
@@ -321,6 +358,8 @@ with tab2:
                                     "p_model":   comp_val,
                                     "p_market":  mkt_prob,
                                     "vol":       int(parse_volume(m)),
+                                    "form_fav":  _form_fav,
+                                    "form_dog":  _form_dog,
                                 })
                         except Exception as ex:
                             edge_str = f"err: {ex}"
@@ -335,6 +374,8 @@ with tab2:
                     "Comp Edge":       edge_str,
                     "Sim":             sim_str,
                     "Sim Edge":        sim_edge_str,
+                    "Form-adj":        form_adj_str,
+                    "Form-adj Edge":   form_adj_edge_str,
                     "Signal":          signal,
                     "Vol":             int(parse_volume(m)),
                 })
@@ -404,6 +445,42 @@ with tab2:
                     st.metric("Total stake", f"${total_stake:,.2f}")
                 with ec3:
                     st.metric("% of bankroll", f"{total_stake/bankroll*100:.1f}%")
+
+                # ── Velocity breakdown for green-zone BET rows ─────────────────
+                bet_rows_with_form = [r for r in sized if r["signal"] == "BET"
+                                      and (r.get("form_fav") or r.get("form_dog"))]
+                if bet_rows_with_form:
+                    st.markdown("#### Recent Form — Green Zone")
+                    for r in bet_rows_with_form:
+                        f_fav = r.get("form_fav")
+                        f_dog = r.get("form_dog")
+                        with st.expander(f"{r['favourite']} vs {r['underdog']}  ·  {r['surface']}  ·  {r['tourney']}"):
+                            fc_l, fc_r = st.columns(2)
+                            for col, pname, fd in [(fc_l, r["favourite"], f_fav), (fc_r, r["underdog"], f_dog)]:
+                                with col:
+                                    st.markdown(f"**{pname}**")
+                                    if fd:
+                                        results_seq = fd.get("results", [])[:7]
+                                        badges = "  ".join(
+                                            f":green[**W**]" if x == "W" else f":red[**L**]"
+                                            for x in results_seq
+                                        )
+                                        st.markdown(badges)
+                                        wr30 = fd.get("win_rate_30d")
+                                        wr60 = fd.get("win_rate_60d")
+                                        n30  = fd.get("n_30d", 0)
+                                        n60  = fd.get("n_60d", 0)
+                                        streak = fd.get("streak", "—")
+                                        days   = fd.get("days_since_last", "?")
+                                        wr30_str = f"{wr30*100:.0f}% ({n30}m)" if wr30 is not None else "—"
+                                        wr60_str = f"{wr60*100:.0f}% ({n60}m)" if wr60 is not None else "—"
+                                        st.caption(
+                                            f"30d: **{wr30_str}**  ·  60d: {wr60_str}  "
+                                            f"·  Streak: **{streak}**  ·  Last match: {days}d ago"
+                                        )
+                                    else:
+                                        st.caption("No form data")
+
             if not sizing_feed:
                 st.info("No positive-edge H2H markets found yet. Check back when markets are active.")
 
@@ -506,46 +583,89 @@ with tab3:
 
             comp_p1  = result["comp_p1"]
             comp_p2  = 1.0 - comp_p1
+            sim_p1   = result.get("sim_p1")
             elo_diff = result["elo_diff_abs"]
 
-            # ── Win probability metrics ────────────────────────────────────────
-            st.divider()
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.metric(f"{p1_name}", f"{comp_p1*100:.1f}%")
-            with m2:
-                st.metric(f"{p2_name}", f"{comp_p2*100:.1f}%")
-            with m3:
-                if market_p1 is not None:
-                    edge = comp_p1 - market_p1
-                    edge_str = f"{edge*100:+.1f}%"
-                    delta_color = "normal" if abs(edge) >= 0.04 else "off"
-                    st.metric("Edge vs Market", edge_str, delta=edge_str, delta_color=delta_color)
-                else:
-                    st.metric("Market Odds", "Not provided")
+            # Fetch form and compute form-adj
+            _prewarm_form_cache()
+            from tools.player_form import fetch_recent_form as _fetch_form
+            _form1_t3 = _fetch_form(p1_name)
+            _form2_t3 = _fetch_form(p2_name)
+            form_adj_t3 = _form_blend_dash(comp_p1, _form1_t3, _form2_t3)
 
-            # ── Edge signal ────────────────────────────────────────────────────
+            # ── Three-indicator summary ────────────────────────────────────────
+            st.divider()
+            ind_cols = st.columns(3)
+            _indicators = [
+                ("Composite",    comp_p1, 1 - comp_p1),
+                ("Simulation",   sim_p1,  1 - sim_p1 if sim_p1 else None),
+                ("Form-adj",     form_adj_t3, 1 - form_adj_t3 if form_adj_t3 else None),
+            ]
+            for col, (label, v1, v2) in zip(ind_cols, _indicators):
+                with col:
+                    if v1 is not None:
+                        delta = None
+                        if market_p1 is not None:
+                            _e = v1 - market_p1
+                            delta = f"{_e*100:+.1f}% edge"
+                        st.metric(
+                            label,
+                            f"{v1*100:.1f}% / {v2*100:.1f}%",
+                            delta=delta,
+                            delta_color="normal" if (delta and abs(v1 - market_p1) >= 0.04) else "off",
+                        )
+                    else:
+                        st.metric(label, "—")
+
+            # ── Edge signal (comp-based) ───────────────────────────────────────
             if market_p1 is not None:
                 edge = comp_p1 - market_p1
                 market_p2 = 1.0 - market_p1
                 if edge > 0.04:
                     st.success(
                         f"**VALUE — Model favors {p1_name}**  |  "
-                        f"Model: {comp_p1*100:.1f}%  vs  Market: {market_p1*100:.1f}%  |  "
+                        f"Comp: {comp_p1*100:.1f}%  vs  Market: {market_p1*100:.1f}%  |  "
                         f"Edge: {edge*100:+.1f}%"
                     )
                 elif edge < -0.04:
                     st.error(
                         f"**VALUE — Model favors {p2_name}**  |  "
-                        f"Model: {comp_p2*100:.1f}%  vs  Market: {market_p2*100:.1f}%  |  "
+                        f"Comp: {comp_p2*100:.1f}%  vs  Market: {market_p2*100:.1f}%  |  "
                         f"Edge: {abs(edge)*100:.1f}%"
                     )
                 else:
                     st.info(
                         f"Model and market roughly agree  |  "
-                        f"Model: {comp_p1*100:.1f}%  vs  Market: {market_p1*100:.1f}%  |  "
+                        f"Comp: {comp_p1*100:.1f}%  vs  Market: {market_p1*100:.1f}%  |  "
                         f"Edge: {edge*100:+.1f}%"
                     )
+
+            # ── Recent Form breakdown ─────────────────────────────────────────
+            if _form1_t3 or _form2_t3:
+                st.subheader("Recent Form")
+                fcols = st.columns(2)
+                for col, pname, fd in [(fcols[0], p1_name, _form1_t3), (fcols[1], p2_name, _form2_t3)]:
+                    with col:
+                        st.markdown(f"**{pname}**")
+                        if fd:
+                            results_seq = fd.get("results", [])[:7]
+                            badges = "  ".join(
+                                ":green[**W**]" if x == "W" else ":red[**L**]"
+                                for x in results_seq
+                            )
+                            st.markdown(badges)
+                            wr30 = fd.get("win_rate_30d")
+                            wr60 = fd.get("win_rate_60d")
+                            n30  = fd.get("n_30d", 0)
+                            n60  = fd.get("n_60d", 0)
+                            st.caption(
+                                f"30d: **{wr30*100:.0f}%** ({n30} matches)  "
+                                f"·  60d: {wr60*100:.0f}% ({n60})  "
+                                f"·  Streak: **{fd.get('streak','—')}**  "
+                                f"·  Last: {fd.get('days_since_last','?')}d ago"
+                            )
+                        else:
+                            st.caption("No form data available")
 
             # ── Component breakdown chart ──────────────────────────────────────
             st.subheader("Model Components")
