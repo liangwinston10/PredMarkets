@@ -285,11 +285,13 @@ with tab2:
                 eng = wta_eng if wta else atp_eng
                 sts = wta_sts if wta else atp_sts
 
-                comp_val  = None
-                edge_val  = None
-                model_str = "—"
-                edge_str  = "—"
-                signal    = "—"
+                comp_val     = None
+                edge_val     = None
+                model_str    = "—"
+                edge_str     = "—"
+                sim_str      = "—"
+                sim_edge_str = "—"
+                signal       = "—"
 
                 if eng and sts and mkt_prob is not None:
                     known = sts.get("known_players", [])
@@ -297,12 +299,16 @@ with tab2:
                     p2 = _find_player(dog, known)
                     if p1 and p2 and p1 != p2:
                         try:
-                            res      = _wta_predict(p1, p2, surf, mkt_prob, eng, sts) if wta else \
-                                       _atp_predict(p1, p2, surf, bo, mkt_prob, eng, sts)
-                            comp_val = res["comp_p1"]
-                            edge_val = comp_val - mkt_prob
+                            res       = _wta_predict(p1, p2, surf, mkt_prob, eng, sts) if wta else \
+                                        _atp_predict(p1, p2, surf, bo, mkt_prob, eng, sts)
+                            comp_val  = res["comp_p1"]
+                            sim_val   = res.get("sim_p1")
+                            edge_val  = comp_val - mkt_prob
+                            sim_edge  = (sim_val - mkt_prob) if sim_val is not None else None
                             model_str = f"{comp_val*100:.1f}%"
+                            sim_str   = f"{sim_val*100:.1f}%" if sim_val is not None else "—"
                             edge_str  = f"{edge_val*100:+.1f}%"
+                            sim_edge_str = f"{sim_edge*100:+.1f}%" if sim_edge is not None else "—"
                             signal    = "VALUE" if abs(edge_val) >= 0.04 else "~"
                             if edge_val is not None and edge_val >= 0.04:
                                 sizing_feed.append({
@@ -325,8 +331,10 @@ with tab2:
                     "Underdog":        dog,
                     "Surface":         surf,
                     "Mkt":             f"{mkt_prob*100:.0f}%" if mkt_prob else "—",
-                    "Model":           model_str,
-                    "Edge":            edge_str,
+                    "Comp":            model_str,
+                    "Comp Edge":       edge_str,
+                    "Sim":             sim_str,
+                    "Sim Edge":        sim_edge_str,
                     "Signal":          signal,
                     "Vol":             int(parse_volume(m)),
                 })

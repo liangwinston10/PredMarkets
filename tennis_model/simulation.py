@@ -14,6 +14,7 @@ run_simulation(p_serve_a, p_serve_b, …) - Monte Carlo runner
 import random
 import math
 import collections
+from scipy.optimize import brentq
 
 
 # ── Game-level model (closed-form) ────────────────────────────────────────────
@@ -32,6 +33,18 @@ def p_hold_game(p: float) -> float:
     p_deuce    = 20 * p**3 * q**3
     p_win_deuce = p**2 / (p**2 + q**2)
     return p_no_deuce + p_deuce * p_win_deuce
+
+
+# ── SGW inversion ────────────────────────────────────────────────────────────
+
+def sgw_to_point_prob(sgw: float) -> float:
+    """
+    Invert p_hold_game() to recover the point-win-on-serve probability
+    from an observed service game hold rate.
+    Solves: p_hold_game(p) = sgw  via Brent's method.
+    """
+    sgw = max(0.01, min(0.99, sgw))
+    return brentq(lambda p: p_hold_game(p) - sgw, 0.01, 0.99)
 
 
 # ── Tiebreak model (simulation) ───────────────────────────────────────────────

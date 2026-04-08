@@ -21,7 +21,16 @@ import os as _os
 _sim_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..")
 if _sim_dir not in sys.path:
     sys.path.insert(0, _sim_dir)
-from simulation import run_simulation
+from simulation import run_simulation, sgw_to_point_prob
+
+_tools_dir = _os.path.join(_sim_dir, "..")
+if _tools_dir not in sys.path:
+    sys.path.insert(0, _tools_dir)
+try:
+    from tools.player_form import fetch_recent_form, format_form_line as _fmt_form
+    _form_available = True
+except ImportError:
+    _form_available = False
 
 import requests
 import numpy as np
@@ -348,12 +357,10 @@ def predict(p1_name, p2_name, surface, market_p1,
 
     raw_p1 = sc1 / (sc1 + sc2) if (sc1 + sc2) > 0 else 0.5
 
-    # Simulation-based probability (opponent-adjusted serve blend)
-    p_serve_1 = (s1["sgw"] + (1 - s2["sgw"])) / 2
-    p_serve_2 = (s2["sgw"] + (1 - s1["sgw"])) / 2
+    # Simulation-based probability — invert sgw to point-level probability first
+    p_serve_1 = (sgw_to_point_prob(s1["sgw"]) + (1 - sgw_to_point_prob(s2["sgw"]))) / 2
+    p_serve_2 = (sgw_to_point_prob(s2["sgw"]) + (1 - sgw_to_point_prob(s1["sgw"]))) / 2
     sim = run_simulation(p_serve_1, p_serve_2, best_of=3, n_sims=10_000)
-    W_SIM, W_COMP = 0.60, 0.40
-    raw_p1 = W_SIM * sim["p_match_a"] + W_COMP * raw_p1
 
     key = tuple(sorted([p1_name, p2_name]))
     h2h_entry = h2h_map.get(key, [0, 0])
@@ -384,7 +391,7 @@ def predict(p1_name, p2_name, surface, market_p1,
 
 # ── Display ───────────────────────────────────────────────────────────────────
 
-def display(p1_name, p2_name, surface, result, market_p1):
+def display(p1_name, p2_name, surface, result, market_p1, form1=None, form2=None):
     W = 54
     comp1 = result["comp_p1"];  comp2 = 1 - comp1
     elo1  = result["elo_p1"];   elo2  = 1 - elo1
@@ -446,6 +453,12 @@ def display(p1_name, p2_name, surface, result, market_p1):
 
     fat_line = f"║    {'Fatigue mult':<18} {result['fat1']:.2f}× vs   {result['fat2']:.2f}×"
     lines.append(fat_line[:W+2].ljust(W+2) + "║")
+
+    if form1 is not None or form2 is not None:
+        lines.append(f"╠{'═'*W}╣")
+        lines.append(f"║{'  RECENT FORM':<{W}}║")
+        lines.append(_fmt_form(p1_name, form1))
+        lines.append(_fmt_form(p2_name, form2))
 
     lines.append(f"╚{'═'*W}╝")
 
@@ -595,7 +608,12 @@ def main():
             elo_ratings, surf_elo_by_name, rank_pts_map, get_stats, last_date, h2h_map, today
         )
 
-        display(p1_name, p2_name, surface_raw, result, market_p1)
+        form1 = form2 = None
+        if _form_available:
+            form1 = fetch_recent_form(p1_name)
+            form2 = fetch_recent_form(p2_name)
+
+        display(p1_name, p2_name, surface_raw, result, market_p1, form1, form2)
 
         again = input("Run another match? [y/n]: ").strip().lower()
         if again != "y":
