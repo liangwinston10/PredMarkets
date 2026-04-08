@@ -47,11 +47,11 @@ def get_wta_engine_and_stats():
     return engine, stats
 
 
-@st.cache_resource(ttl=3600, show_spinner="Loading recent match form data...")
-def _prewarm_form_cache():
-    """Load ESPN 90-day cache once per process. fetch_recent_form() hits module-level cache after."""
-    from tools.player_form import _load_cache
-    _load_cache()
+@st.cache_data(ttl=1800, show_spinner=False)
+def _cached_form(player_name: str):
+    """Cache each player's form data for 30 min — avoids module-level cache fragility in Streamlit."""
+    from tools.player_form import fetch_recent_form
+    return fetch_recent_form(player_name)
 
 
 def _form_blend_dash(comp_p1: float, form1, form2):
@@ -263,10 +263,6 @@ with tab2:
             )
             st.session_state["bankroll"] = bankroll
 
-            # ── Pre-warm ESPN form cache (3s first time, instant after) ──────────
-            from tools.player_form import fetch_recent_form as _fetch_form
-            _prewarm_form_cache()
-
             # ── Build edge rows ────────────────────────────────────────────────
             edge_rows   = []
             sizing_feed = []   # for size_day()
@@ -339,8 +335,8 @@ with tab2:
                             sim_edge_str = f"{sim_edge*100:+.1f}%" if sim_edge is not None else "—"
 
                             # Form adjustment (ESPN velocity, 20% weight)
-                            _form_fav = _fetch_form(p1)
-                            _form_dog = _fetch_form(p2)
+                            _form_fav = _cached_form(p1)
+                            _form_dog = _cached_form(p2)
                             _fadj_val = _form_blend_dash(comp_val, _form_fav, _form_dog)
                             if _fadj_val is not None:
                                 form_adj_str = f"{_fadj_val*100:.1f}%"
@@ -587,10 +583,8 @@ with tab3:
             elo_diff = result["elo_diff_abs"]
 
             # Fetch form and compute form-adj
-            _prewarm_form_cache()
-            from tools.player_form import fetch_recent_form as _fetch_form
-            _form1_t3 = _fetch_form(p1_name)
-            _form2_t3 = _fetch_form(p2_name)
+            _form1_t3 = _cached_form(p1_name)
+            _form2_t3 = _cached_form(p2_name)
             form_adj_t3 = _form_blend_dash(comp_p1, _form1_t3, _form2_t3)
 
             # ── Three-indicator summary ────────────────────────────────────────
@@ -658,9 +652,11 @@ with tab3:
                             wr60 = fd.get("win_rate_60d")
                             n30  = fd.get("n_30d", 0)
                             n60  = fd.get("n_60d", 0)
+                            wr30_s = f"{wr30*100:.0f}% ({n30}m)" if wr30 is not None else "—"
+                            wr60_s = f"{wr60*100:.0f}% ({n60}m)" if wr60 is not None else "—"
                             st.caption(
-                                f"30d: **{wr30*100:.0f}%** ({n30} matches)  "
-                                f"·  60d: {wr60*100:.0f}% ({n60})  "
+                                f"30d: **{wr30_s}**  "
+                                f"·  60d: {wr60_s}  "
                                 f"·  Streak: **{fd.get('streak','—')}**  "
                                 f"·  Last: {fd.get('days_since_last','?')}d ago"
                             )
