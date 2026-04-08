@@ -210,11 +210,16 @@ def fetch_recent_form(player_name: str, n: int = 10) -> dict | None:
         last_date = datetime.date.fromisoformat(player_matches[0]["date"])
         days_ago = (today - last_date).days
 
+        n_30d = len([m for m in player_matches if m["date"] >= cutoff_30])
+        n_60d = len([m for m in player_matches if m["date"] >= cutoff_60])
+
         return {
             "results":         [m["result"] for m in player_matches[:n]],
             "opponents":       [m["opponent"] for m in player_matches[:n]],
             "win_rate_30d":    win_rate(cutoff_30),
             "win_rate_60d":    win_rate(cutoff_60),
+            "n_30d":           n_30d,
+            "n_60d":           n_60d,
             "days_since_last": days_ago,
             "last_match_date": player_matches[0]["date"],
             "streak":          f"{streak_char}{streak_count}",

@@ -55,6 +55,10 @@ SURFACE_WEIGHTS = {
 }
 DEFAULT_WEIGHTS = {"return": 0.134, "elo": 0.210, "surf_elo": 0.318, "rank": 0.161, "ace": 0.177}
 
+FORM_BLEND_WEIGHT = 0.20   # form nudge weight (unvalidated — composite is 30K-calibrated)
+FORM_MIN_MATCHES  = 3      # use 30d window only if >= this many matches
+FORM_FLOOR        = 0.10   # clip win rates to [FLOOR, 1-FLOOR] before ratio
+
 SURFACE_ELO_PRIOR = 10  # blend surface Elo toward overall Elo (matches backtest.py)
 
 POP_SGW      = 0.62
@@ -198,6 +202,20 @@ def fatigue_multiplier(days: Optional[float]) -> float:
 def bo5_adjust(p: float) -> float:
     q = 1 - p
     return p**3 * (1 + 3*q + 6*q**2)
+
+
+def form_blend(comp_p1: float, form1: dict | None, form2: dict | None) -> float | None:
+    """Nudge comp_p1 toward form win-rate ratio. Returns None if form unavailable."""
+    if form1 is None or form2 is None:
+        return None
+    wr1 = form1.get("win_rate_30d") if form1.get("n_30d", 0) >= FORM_MIN_MATCHES else form1.get("win_rate_60d")
+    wr2 = form2.get("win_rate_30d") if form2.get("n_30d", 0) >= FORM_MIN_MATCHES else form2.get("win_rate_60d")
+    if wr1 is None or wr2 is None:
+        return None
+    c1 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr1))
+    c2 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr2))
+    ratio = c1 / (c1 + c2)
+    return max(0.001, min(0.999, (1 - FORM_BLEND_WEIGHT) * comp_p1 + FORM_BLEND_WEIGHT * ratio))
 
 
 def h2h_shrink(comp_p: float, h2h_wins: int, h2h_total: int) -> float:
@@ -415,7 +433,7 @@ def predict(p1_name, p2_name, surface, best_of, market_p1,
 
 # ── Display ───────────────────────────────────────────────────────────────────
 
-def display(p1_name, p2_name, surface, best_of, result, market_p1, sizing=None, form1=None, form2=None):
+def display(p1_name, p2_name, surface, best_of, result, market_p1, sizing=None, form1=None, form2=None, form_adj_p1=None):
     W = 54
     comp1 = result["comp_p1"];  comp2 = 1 - comp1
     elo1  = result["elo_p1"];   elo2  = 1 - elo1
@@ -428,6 +446,12 @@ def display(p1_name, p2_name, surface, best_of, result, market_p1, sizing=None, 
         f"║  {surface} · Best of {best_of:<{W-17}}║",
         f"╠{'═'*W}╣",
         f"║  {'COMPOSITE MODEL':<22} {comp1*100:.1f}%  /  {comp2*100:.1f}%{'':<{W-40}}║",
+    ]
+    sim1 = result.get("sim_p1")
+    if sim1 is not None:
+        sim2 = 1 - sim1
+        lines.append(f"║  {'Simulation (10K)':<22} {sim1*100:.1f}%  /  {sim2*100:.1f}%{'':<{W-40}}║")
+    lines += [
         f"║  {'Elo only':<22} {elo1*100:.1f}%  /  {elo2*100:.1f}%{'':<{W-40}}║",
     ]
     band_label, base_rate, elo_bias, comp_bias = elo_diff_calib(result.get("elo_diff_abs", 0))
@@ -445,6 +469,10 @@ def display(p1_name, p2_name, surface, best_of, result, market_p1, sizing=None, 
     calib_elo2  = 1 - calib_elo1
     lines.append(f"║  {'Calibrated comp':<22} {calib_comp1*100:.1f}%  /  {calib_comp2*100:.1f}%{'':<{W-40}}║")
     lines.append(f"║  {'Calibrated Elo':<22} {calib_elo1*100:.1f}%  /  {calib_elo2*100:.1f}%{'':<{W-40}}║")
+    if form_adj_p1 is not None:
+        fadj2 = 1 - form_adj_p1
+        delta = (form_adj_p1 - comp1) * 100
+        lines.append(f"║  {'Form-adj comp':<22} {form_adj_p1*100:.1f}%  /  {fadj2*100:.1f}%  ({delta:+.1f}pp){'':<{W-50}}║")
 
     if market_p1 is not None:
         market2 = 1 - market_p1
@@ -735,7 +763,8 @@ def main():
             form1 = fetch_recent_form(p1_name)
             form2 = fetch_recent_form(p2_name)
 
-        display(p1_name, p2_name, surface_raw, best_of, result, market_p1, sizing, form1, form2)
+        form_adj = form_blend(result["comp_p1"], form1, form2)
+        display(p1_name, p2_name, surface_raw, best_of, result, market_p1, sizing, form1, form2, form_adj)
 
         if sizing and sizing["signal"] == "BET":
             confirm = input(f"  Place this bet (${sizing['stake']:.2f} on {p1_name})? [y/n]: ").strip().lower()

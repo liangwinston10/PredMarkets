@@ -50,6 +50,10 @@ SURFACE_WEIGHTS = {
 }
 DEFAULT_WEIGHTS = {"elo": 0.315, "surf_elo": 0.159, "rank": 0.147, "ace": 0.379}
 
+FORM_BLEND_WEIGHT = 0.20
+FORM_MIN_MATCHES  = 3
+FORM_FLOOR        = 0.10
+
 SURFACE_ELO_PRIOR = 10
 
 # WTA population averages
@@ -182,6 +186,20 @@ def fatigue_multiplier(days: Optional[float]) -> float:
     if days <= 14: return 1.0
     if days <= 30: return 0.99
     return 0.96
+
+
+def form_blend(comp_p1: float, form1: dict | None, form2: dict | None) -> float | None:
+    """Nudge comp_p1 toward form win-rate ratio. Returns None if form unavailable."""
+    if form1 is None or form2 is None:
+        return None
+    wr1 = form1.get("win_rate_30d") if form1.get("n_30d", 0) >= FORM_MIN_MATCHES else form1.get("win_rate_60d")
+    wr2 = form2.get("win_rate_30d") if form2.get("n_30d", 0) >= FORM_MIN_MATCHES else form2.get("win_rate_60d")
+    if wr1 is None or wr2 is None:
+        return None
+    c1 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr1))
+    c2 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr2))
+    ratio = c1 / (c1 + c2)
+    return max(0.001, min(0.999, (1 - FORM_BLEND_WEIGHT) * comp_p1 + FORM_BLEND_WEIGHT * ratio))
 
 
 def h2h_shrink(comp_p: float, h2h_wins: int, h2h_total: int) -> float:
@@ -391,7 +409,7 @@ def predict(p1_name, p2_name, surface, market_p1,
 
 # ── Display ───────────────────────────────────────────────────────────────────
 
-def display(p1_name, p2_name, surface, result, market_p1, form1=None, form2=None):
+def display(p1_name, p2_name, surface, result, market_p1, form1=None, form2=None, form_adj_p1=None):
     W = 54
     comp1 = result["comp_p1"];  comp2 = 1 - comp1
     elo1  = result["elo_p1"];   elo2  = 1 - elo1
@@ -404,6 +422,12 @@ def display(p1_name, p2_name, surface, result, market_p1, form1=None, form2=None
         f"║  {surface} · Best of 3{'':<{W-17}}║",
         f"╠{'═'*W}╣",
         f"║  {'COMPOSITE MODEL':<22} {comp1*100:.1f}%  /  {comp2*100:.1f}%{'':<{W-40}}║",
+    ]
+    sim1 = result.get("sim_p1")
+    if sim1 is not None:
+        sim2 = 1 - sim1
+        lines.append(f"║  {'Simulation (10K)':<22} {sim1*100:.1f}%  /  {sim2*100:.1f}%{'':<{W-40}}║")
+    lines += [
         f"║  {'Elo only':<22} {elo1*100:.1f}%  /  {elo2*100:.1f}%{'':<{W-40}}║",
     ]
     band_label, base_rate, elo_bias, comp_bias = elo_diff_calib(result.get("elo_diff_abs", 0))
@@ -418,6 +442,10 @@ def display(p1_name, p2_name, surface, result, market_p1, form1=None, form2=None
         calib_elo1  = max(0.001, min(0.999, elo1  + sign * elo_bias))
         lines.append(f"║  {'Calibrated comp':<22} {calib_comp1*100:.1f}%  /  {(1-calib_comp1)*100:.1f}%{'':<{W-40}}║")
         lines.append(f"║  {'Calibrated Elo':<22} {calib_elo1*100:.1f}%  /  {(1-calib_elo1)*100:.1f}%{'':<{W-40}}║")
+    if form_adj_p1 is not None:
+        fadj2 = 1 - form_adj_p1
+        delta = (form_adj_p1 - comp1) * 100
+        lines.append(f"║  {'Form-adj comp':<22} {form_adj_p1*100:.1f}%  /  {fadj2*100:.1f}%  ({delta:+.1f}pp){'':<{W-50}}║")
 
     if market_p1 is not None:
         market2 = 1 - market_p1
@@ -613,7 +641,8 @@ def main():
             form1 = fetch_recent_form(p1_name)
             form2 = fetch_recent_form(p2_name)
 
-        display(p1_name, p2_name, surface_raw, result, market_p1, form1, form2)
+        form_adj = form_blend(result["comp_p1"], form1, form2)
+        display(p1_name, p2_name, surface_raw, result, market_p1, form1, form2, form_adj)
 
         again = input("Run another match? [y/n]: ").strip().lower()
         if again != "y":
