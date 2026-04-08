@@ -17,6 +17,12 @@ from typing import Optional
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
+import os as _os
+_sim_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..")
+if _sim_dir not in sys.path:
+    sys.path.insert(0, _sim_dir)
+from simulation import run_simulation
+
 import requests
 import numpy as np
 import pandas as pd
@@ -342,6 +348,13 @@ def predict(p1_name, p2_name, surface, market_p1,
 
     raw_p1 = sc1 / (sc1 + sc2) if (sc1 + sc2) > 0 else 0.5
 
+    # Simulation-based probability (opponent-adjusted serve blend)
+    p_serve_1 = (s1["sgw"] + (1 - s2["sgw"])) / 2
+    p_serve_2 = (s2["sgw"] + (1 - s1["sgw"])) / 2
+    sim = run_simulation(p_serve_1, p_serve_2, best_of=3, n_sims=10_000)
+    W_SIM, W_COMP = 0.60, 0.40
+    raw_p1 = W_SIM * sim["p_match_a"] + W_COMP * raw_p1
+
     key = tuple(sorted([p1_name, p2_name]))
     h2h_entry = h2h_map.get(key, [0, 0])
     h2h_wins_p1 = h2h_entry[0] if p1_name == key[0] else h2h_entry[1] - h2h_entry[0]
@@ -350,15 +363,22 @@ def predict(p1_name, p2_name, surface, market_p1,
     raw_p1 = max(0.001, min(0.999, raw_p1))
 
     return {
-        "comp_p1":      raw_p1,
-        "elo_p1":       elo_p,
-        "surf_elo_p1":  surf_elo_p,
-        "rank_p1":      rank_p,
-        "ace1":         s1["ace_rate"], "ace2": s2["ace_rate"],
-        "rgw1": rgw1,   "rgw2": rgw2,
+        "comp_p1":        raw_p1,
+        "elo_p1":         elo_p,
+        "surf_elo_p1":    surf_elo_p,
+        "rank_p1":        rank_p,
+        "ace1":           s1["ace_rate"], "ace2": s2["ace_rate"],
+        "rgw1": rgw1,     "rgw2": rgw2,
         "sgw1": s1["sgw"], "sgw2": s2["sgw"],
-        "fat1": fat1,   "fat2": fat2,
-        "elo_diff_abs": abs(elo1 - elo2),
+        "fat1": fat1,     "fat2": fat2,
+        "elo_diff_abs":   abs(elo1 - elo2),
+        "sim_p1":         sim["p_match_a"],
+        "sim_set_dist":   sim["set_score_dist"],
+        "sim_confidence": sim["confidence"],
+        "sim_std":        sim["sim_std"],
+        "sim_avg_games":  sim["avg_total_games"],
+        "p_serve_1":      p_serve_1,
+        "p_serve_2":      p_serve_2,
     }
 
 
