@@ -48,9 +48,18 @@ def get_wta_engine_and_stats():
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _get_espn_cache() -> list:
+    """Fetch full 90-day ESPN match list once per 30 min. Cached at Streamlit level."""
+    from tools.player_form import _load_cache
+    return _load_cache()
+
+
 def _cached_form(player_name: str):
-    """Cache each player's form data for 30 min — avoids module-level cache fragility in Streamlit."""
+    """Look up form for a player. Ensures ESPN data is loaded before lookup."""
+    import tools.player_form as _pf_mod
     from tools.player_form import fetch_recent_form
+    if _pf_mod._cache is None:
+        _pf_mod._cache = _get_espn_cache()
     return fetch_recent_form(player_name)
 
 
