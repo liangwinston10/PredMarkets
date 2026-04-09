@@ -345,7 +345,9 @@ with tab2:
                             _fadj_edge = (_fadj_val - mkt_prob) if _fadj_val is not None else None
                             if _fadj_edge is not None and ((edge_val > 0 and _fadj_edge < 0) or (edge_val < 0 and _fadj_edge > 0)):
                                 signal = "CONFLICT"
-                            elif abs(edge_val) >= 0.04:
+                            elif comp_val < 0.5:
+                                signal = "REVERSE"
+                            elif edge_val > 0:
                                 signal = "VALUE"
                             else:
                                 signal = "~"
@@ -383,14 +385,16 @@ with tab2:
                 })
 
             # ── All markets table ──────────────────────────────────────────────
-            show_value_only = st.checkbox("Show VALUE / CONFLICT only", value=False, key="ae_val_only")
+            show_value_only = st.checkbox("Show signals only (VALUE / REVERSE / CONFLICT)", value=False, key="ae_val_only")
             df_edge = pd.DataFrame(edge_rows).sort_values("Vol", ascending=False)
             if show_value_only:
-                df_edge = df_edge[df_edge["Signal"].isin(["VALUE", "CONFLICT"])]
+                df_edge = df_edge[df_edge["Signal"].isin(["VALUE", "REVERSE", "CONFLICT"])]
 
             def _hl_edge(row):
                 if row["Signal"] == "VALUE":
                     return ["background-color: #00c853; color: #000000"] * len(row)
+                if row["Signal"] == "REVERSE":
+                    return ["background-color: #fff176; color: #000000"] * len(row)
                 if row["Signal"] == "CONFLICT":
                     return ["background-color: #ff1744; color: #000000"] * len(row)
                 return [""] * len(row)
