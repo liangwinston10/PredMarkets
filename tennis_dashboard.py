@@ -342,7 +342,13 @@ with tab2:
                                 form_adj_str = f"{_fadj_val*100:.1f}%"
                                 form_adj_edge_str = f"{(_fadj_val - mkt_prob)*100:+.1f}%"
 
-                            signal    = "VALUE" if abs(edge_val) >= 0.04 else "~"
+                            _fadj_edge = (_fadj_val - mkt_prob) if _fadj_val is not None else None
+                            if _fadj_edge is not None and ((edge_val > 0 and _fadj_edge < 0) or (edge_val < 0 and _fadj_edge > 0)):
+                                signal = "CONFLICT"
+                            elif abs(edge_val) >= 0.04:
+                                signal = "VALUE"
+                            else:
+                                signal = "~"
                             if edge_val is not None and edge_val >= 0.04:
                                 sizing_feed.append({
                                     "match_id":  f"{fav} vs {dog}",
@@ -377,11 +383,19 @@ with tab2:
                 })
 
             # ── All markets table ──────────────────────────────────────────────
-            show_value_only = st.checkbox("Show VALUE bets only", value=False, key="ae_val_only")
+            show_value_only = st.checkbox("Show VALUE / CONFLICT only", value=False, key="ae_val_only")
             df_edge = pd.DataFrame(edge_rows).sort_values("Vol", ascending=False)
             if show_value_only:
-                df_edge = df_edge[df_edge["Signal"] == "VALUE"]
-            st.dataframe(df_edge, width='stretch', hide_index=True)
+                df_edge = df_edge[df_edge["Signal"].isin(["VALUE", "CONFLICT"])]
+
+            def _hl_edge(row):
+                if row["Signal"] == "VALUE":
+                    return ["background-color: #1a4a1a"] * len(row)
+                if row["Signal"] == "CONFLICT":
+                    return ["background-color: #4a1a1a"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(df_edge.style.apply(_hl_edge, axis=1), width='stretch', hide_index=True)
 
             # ── Bet sizing table (VALUE + positive edge) ──────────────────────
             if sizing_feed:
@@ -429,6 +443,8 @@ with tab2:
                         return ["background-color: #00c853; color: #000000"] * len(row)
                     if row["Signal"] == "CAP_BOUND":
                         return ["background-color: #ff6d00; color: #000000"] * len(row)
+                    if row["Signal"] == "CONFLICT":
+                        return ["background-color: #b71c1c; color: #ffffff"] * len(row)
                     return [""] * len(row)
 
                 st.dataframe(df_bets.style.apply(_hl, axis=1), width='stretch', hide_index=True)
