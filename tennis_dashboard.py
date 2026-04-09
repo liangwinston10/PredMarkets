@@ -267,6 +267,7 @@ with tab2:
             edge_rows    = []
             sizing_feed  = []   # VALUE bets — buy Yes
             reverse_feed = []   # REVERSE bets — buy No
+            _sized_events = set()  # deduplicate: each event_ticker in at most one feed
 
             # Build event→[markets] index for opponent lookup
             _ev_idx: dict = {}
@@ -352,33 +353,41 @@ with tab2:
                                 signal = "VALUE"
                             else:
                                 signal = "~"
-                            if signal != "REVERSE" and edge_val is not None and edge_val >= 0.04:
+                            if signal != "REVERSE" and edge_val is not None and edge_val >= 0.04 \
+                                    and _ev_tk not in _sized_events:
+                                _sized_events.add(_ev_tk)
                                 sizing_feed.append({
-                                    "match_id":  f"{fav} vs {dog}",
-                                    "favourite": fav,
-                                    "underdog":  dog,
-                                    "tourney":   tourney,
-                                    "surface":   surf,
-                                    "round":     rnd,
-                                    "p_model":   comp_val,
-                                    "p_market":  mkt_prob,
-                                    "vol":       int(parse_volume(m)),
-                                    "form_fav":  _form_fav,
-                                    "form_dog":  _form_dog,
+                                    "match_id":   f"{fav} vs {dog}",
+                                    "favourite":  fav,
+                                    "underdog":   dog,
+                                    "tourney":    tourney,
+                                    "surface":    surf,
+                                    "round":      rnd,
+                                    "p_model":    comp_val,
+                                    "p_market":   mkt_prob,
+                                    "vol":        int(parse_volume(m)),
+                                    "form_fav":   _form_fav,
+                                    "form_dog":   _form_dog,
+                                    "sim_val":    sim_val,
+                                    "fadj_val":   _fadj_val,
                                 })
-                            if signal == "REVERSE" and comp_val is not None and mkt_prob is not None:
+                            if signal == "REVERSE" and comp_val is not None and mkt_prob is not None \
+                                    and _ev_tk not in _sized_events:
+                                _sized_events.add(_ev_tk)
                                 reverse_feed.append({
-                                    "match_id":  f"{dog} vs {fav} (No)",
-                                    "favourite": dog,
-                                    "underdog":  fav,
-                                    "tourney":   tourney,
-                                    "surface":   surf,
-                                    "round":     rnd,
-                                    "p_model":   1 - comp_val,
-                                    "p_market":  1 - mkt_prob,
-                                    "vol":       int(parse_volume(m)),
-                                    "form_fav":  _form_dog,
-                                    "form_dog":  _form_fav,
+                                    "match_id":   f"{dog} vs {fav} (No)",
+                                    "favourite":  dog,
+                                    "underdog":   fav,
+                                    "tourney":    tourney,
+                                    "surface":    surf,
+                                    "round":      rnd,
+                                    "p_model":    1 - comp_val,
+                                    "p_market":   1 - mkt_prob,
+                                    "vol":        int(parse_volume(m)),
+                                    "form_fav":   _form_dog,
+                                    "form_dog":   _form_fav,
+                                    "sim_val":    (1 - sim_val) if sim_val is not None else None,
+                                    "fadj_val":   (1 - _fadj_val) if _fadj_val is not None else None,
                                 })
                         except Exception as ex:
                             edge_str = f"err: {ex}"
@@ -434,13 +443,17 @@ with tab2:
                     p_mkt = r["p_market"]
                     payout = stake * (1 - p_mkt) / p_mkt if (stake > 0 and p_mkt > 0) else 0.0
 
+                    _sv  = r.get("sim_val")
+                    _fv  = r.get("fadj_val")
                     bet_rows.append({
                         "Favourite":    r["favourite"],
                         "Underdog":     r["underdog"],
                         "Tournament":   r["tourney"],
                         "Surface":      r["surface"],
                         "Mkt":          f"{p_mkt*100:.0f}%",
-                        "Model":        f"{r['p_model']*100:.1f}%",
+                        "Comp":         f"{r['p_model']*100:.1f}%",
+                        "Sim":          f"{_sv*100:.1f}%" if _sv is not None else "—",
+                        "Form-adj":     f"{_fv*100:.1f}%" if _fv is not None else "—",
                         "Edge":         f"{edge*100:.1f}%",
                         "Stake ($)":    f"${stake:,.2f}" if stake > 0 else "—",
                         "Payout ($)":   f"${payout:,.2f}" if payout > 0 else "—",
@@ -534,20 +547,24 @@ with tab2:
                     rev_total += stake
                     p_mkt = r["p_market"]   # No price = 1 - original mkt_prob
                     payout = stake * (1 - p_mkt) / p_mkt if (stake > 0 and p_mkt > 0) else 0.0
+                    _sv  = r.get("sim_val")
+                    _fv  = r.get("fadj_val")
                     rev_rows.append({
-                        "Bet On":      r["favourite"],
-                        "Against":     r["underdog"],
-                        "Tournament":  r["tourney"],
-                        "Surface":     r["surface"],
-                        "No Price":    f"{p_mkt*100:.0f}%",
-                        "Model (dog)": f"{r['p_model']*100:.1f}%",
-                        "Edge":        f"{r['edge']*100:.1f}%",
-                        "Stake ($)":   f"${stake:,.2f}" if stake > 0 else "—",
-                        "Payout ($)":  f"${payout:,.2f}" if payout > 0 else "—",
-                        "Signal":      r["signal"],
-                        "Vol":         r["vol"],
-                        "_signal_ord": 0 if r["signal"] == "BET" else 1,
-                        "_edge_val":   r["edge"],
+                        "Bet On":       r["favourite"],
+                        "Against":      r["underdog"],
+                        "Tournament":   r["tourney"],
+                        "Surface":      r["surface"],
+                        "No Price":     f"{p_mkt*100:.0f}%",
+                        "Comp (dog)":   f"{r['p_model']*100:.1f}%",
+                        "Sim (dog)":    f"{_sv*100:.1f}%" if _sv is not None else "—",
+                        "Form-adj (dog)": f"{_fv*100:.1f}%" if _fv is not None else "—",
+                        "Edge":         f"{r['edge']*100:.1f}%",
+                        "Stake ($)":    f"${stake:,.2f}" if stake > 0 else "—",
+                        "Payout ($)":   f"${payout:,.2f}" if payout > 0 else "—",
+                        "Signal":       r["signal"],
+                        "Vol":          r["vol"],
+                        "_signal_ord":  0 if r["signal"] == "BET" else 1,
+                        "_edge_val":    r["edge"],
                     })
 
                 df_rev = (
