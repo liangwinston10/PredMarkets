@@ -352,7 +352,7 @@ with tab2:
                                 signal = "VALUE"
                             else:
                                 signal = "~"
-                            if edge_val is not None and edge_val >= 0.04:
+                            if signal != "REVERSE" and edge_val is not None and edge_val >= 0.04:
                                 sizing_feed.append({
                                     "match_id":  f"{fav} vs {dog}",
                                     "favourite": fav,
