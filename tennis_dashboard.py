@@ -353,7 +353,7 @@ with tab2:
                                 signal = "VALUE"
                             else:
                                 signal = "~"
-                            if signal != "REVERSE" and edge_val is not None and edge_val >= 0.04 \
+                            if signal not in ("REVERSE", "CONFLICT") and edge_val is not None and edge_val > 0 \
                                     and _ev_tk not in _sized_events:
                                 _sized_events.add(_ev_tk)
                                 sizing_feed.append({
