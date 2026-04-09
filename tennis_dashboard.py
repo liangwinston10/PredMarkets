@@ -48,10 +48,14 @@ def get_wta_engine_and_stats():
 
 
 def _cached_form(player_name: str):
-    """Fetch recent form for a player. Module-level ESPN cache persists between Streamlit reruns."""
-    from tools.player_form import _load_cache, fetch_recent_form
-    _load_cache()   # no-op after first call (checks _cache is not None)
-    return fetch_recent_form(player_name)
+    """Fetch recent form. Stores ESPN dataset in session_state to survive Streamlit reruns."""
+    import tools.player_form as _pf
+    # Load ESPN data into session_state once per session (~3s), then inject into module
+    if "espn_cache" not in st.session_state:
+        st.session_state["espn_cache"] = _pf._load_cache()
+    if _pf._cache is None:
+        _pf._cache = st.session_state["espn_cache"]
+    return _pf.fetch_recent_form(player_name)
 
 
 def _form_blend_dash(comp_p1: float, form1, form2):
