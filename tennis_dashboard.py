@@ -264,8 +264,9 @@ with tab2:
             st.session_state["bankroll"] = bankroll
 
             # ── Build edge rows ────────────────────────────────────────────────
-            edge_rows   = []
-            sizing_feed = []   # for size_day()
+            edge_rows    = []
+            sizing_feed  = []   # VALUE bets — buy Yes
+            reverse_feed = []   # REVERSE bets — buy No
 
             # Build event→[markets] index for opponent lookup
             _ev_idx: dict = {}
@@ -364,6 +365,20 @@ with tab2:
                                     "vol":       int(parse_volume(m)),
                                     "form_fav":  _form_fav,
                                     "form_dog":  _form_dog,
+                                })
+                            if signal == "REVERSE" and comp_val is not None and mkt_prob is not None:
+                                reverse_feed.append({
+                                    "match_id":  f"{dog} vs {fav} (No)",
+                                    "favourite": dog,
+                                    "underdog":  fav,
+                                    "tourney":   tourney,
+                                    "surface":   surf,
+                                    "round":     rnd,
+                                    "p_model":   1 - comp_val,
+                                    "p_market":  1 - mkt_prob,
+                                    "vol":       int(parse_volume(m)),
+                                    "form_fav":  _form_dog,
+                                    "form_dog":  _form_fav,
                                 })
                         except Exception as ex:
                             edge_str = f"err: {ex}"
@@ -499,6 +514,86 @@ with tab2:
 
             if not sizing_feed:
                 st.info("No positive-edge H2H markets found yet. Check back when markets are active.")
+
+            # ── Reverse bet sizing (REVERSE signal — buy No on market fav) ────
+            if reverse_feed:
+                st.subheader("🟡 Reverse Sizing")
+                st.caption(f"Bankroll: ${bankroll:,.2f}  |  1/16 Kelly (conservative)  |  Buying No on market favourite")
+
+                rev_sized = size_day(reverse_feed, bankroll=bankroll,
+                                     round_stage=reverse_feed[0]["round"],
+                                     kelly_fraction=0.0625)
+
+                rev_rows = []
+                rev_total = 0.0
+                for r in rev_sized:
+                    stake = r["stake"]
+                    rev_total += stake
+                    p_mkt = r["p_market"]   # No price = 1 - original mkt_prob
+                    payout = stake * (1 - p_mkt) / p_mkt if (stake > 0 and p_mkt > 0) else 0.0
+                    rev_rows.append({
+                        "Bet On":      r["favourite"],
+                        "Against":     r["underdog"],
+                        "Tournament":  r["tourney"],
+                        "Surface":     r["surface"],
+                        "No Price":    f"{p_mkt*100:.0f}%",
+                        "Model (dog)": f"{r['p_model']*100:.1f}%",
+                        "Edge":        f"{r['edge']*100:.1f}%",
+                        "Stake ($)":   f"${stake:,.2f}" if stake > 0 else "—",
+                        "Payout ($)":  f"${payout:,.2f}" if payout > 0 else "—",
+                        "Signal":      r["signal"],
+                        "Vol":         r["vol"],
+                        "_signal_ord": 0 if r["signal"] == "BET" else 1,
+                        "_edge_val":   r["edge"],
+                    })
+
+                df_rev = (
+                    pd.DataFrame(rev_rows)
+                    .sort_values(["_signal_ord", "_edge_val"], ascending=[True, False])
+                    .drop(columns=["_signal_ord", "_edge_val"])
+                )
+
+                def _hl_rev(row):
+                    if row["Signal"] == "BET":
+                        return ["background-color: #fff176; color: #000000"] * len(row)
+                    if row["Signal"] == "CAP_BOUND":
+                        return ["background-color: #ff6d00; color: #000000"] * len(row)
+                    return [""] * len(row)
+
+                st.dataframe(df_rev.style.apply(_hl_rev, axis=1), width='stretch', hide_index=True)
+
+                rc1, rc2, rc3 = st.columns(3)
+                with rc1:
+                    st.metric("Actionable reverses", sum(1 for r in rev_sized if r["signal"] == "BET"))
+                with rc2:
+                    st.metric("Total stake", f"${rev_total:,.2f}")
+                with rc3:
+                    st.metric("% of bankroll", f"{rev_total/bankroll*100:.1f}%")
+
+                rev_bet_with_form = [r for r in rev_sized if r["signal"] == "BET"
+                                     and (r.get("form_fav") or r.get("form_dog"))]
+                if rev_bet_with_form:
+                    st.markdown("#### Recent Form — Reverse Zone")
+                    for r in rev_bet_with_form:
+                        with st.expander(f"{r['favourite']} (No on {r['underdog']})  ·  {r['surface']}  ·  {r['tourney']}"):
+                            fc_l, fc_r = st.columns(2)
+                            for col, pname, fd in [(fc_l, r["favourite"], r.get("form_fav")),
+                                                    (fc_r, r["underdog"],  r.get("form_dog"))]:
+                                with col:
+                                    st.markdown(f"**{pname}**")
+                                    if fd:
+                                        badges = "  ".join(":green[**W**]" if x == "W" else ":red[**L**]"
+                                                           for x in fd.get("results", [])[:7])
+                                        st.markdown(badges)
+                                        wr30 = fd.get("win_rate_30d"); n30 = fd.get("n_30d", 0)
+                                        wr60 = fd.get("win_rate_60d"); n60 = fd.get("n_60d", 0)
+                                        wr30_s = f"{wr30*100:.0f}% ({n30}m)" if wr30 is not None else "—"
+                                        wr60_s = f"{wr60*100:.0f}% ({n60}m)" if wr60 is not None else "—"
+                                        st.caption(f"30d: **{wr30_s}**  ·  60d: {wr60_s}  "
+                                                   f"·  Streak: **{fd.get('streak','—')}**  "
+                                                   f"·  Last: {fd.get('days_since_last','?')}d ago")
+                                    else:
+                                        st.caption("No form data")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -115,6 +115,7 @@ def size_day(
     matches: list[dict],
     bankroll: float,
     round_stage: str,
+    kelly_fraction: float = KELLY_FRACTION,
 ) -> list[dict]:
     """
     Size all actionable bets for a trading day, respecting the daily cap.
@@ -152,6 +153,7 @@ def size_day(
             bankroll=bankroll,
             current_exposure=current_exposure,
             round_stage=round_stage,
+            kelly_fraction=kelly_fraction,
         )
         if sizing["signal"] == "BET":
             current_exposure += sizing["stake_pct"]
