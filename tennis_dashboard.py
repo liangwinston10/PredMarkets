@@ -390,9 +390,9 @@ with tab2:
 
             def _hl_edge(row):
                 if row["Signal"] == "VALUE":
-                    return ["background-color: #1a4a1a"] * len(row)
+                    return ["background-color: #00c853; color: #000000"] * len(row)
                 if row["Signal"] == "CONFLICT":
-                    return ["background-color: #4a1a1a"] * len(row)
+                    return ["background-color: #ff1744; color: #000000"] * len(row)
                 return [""] * len(row)
 
             st.dataframe(df_edge.style.apply(_hl_edge, axis=1), width='stretch', hide_index=True)
