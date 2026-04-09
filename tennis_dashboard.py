@@ -521,8 +521,11 @@ with tab2:
                 st.caption(f"Bankroll: ${bankroll:,.2f}  |  1/16 Kelly (conservative)  |  Buying No on market favourite")
 
                 rev_sized = size_day(reverse_feed, bankroll=bankroll,
-                                     round_stage=reverse_feed[0]["round"],
-                                     kelly_fraction=0.0625)
+                                     round_stage=reverse_feed[0]["round"])
+                # Apply 1/16 Kelly conservatively by halving the ⅛ Kelly stakes
+                for _r in rev_sized:
+                    _r["stake"] = round(_r["stake"] * 0.5, 2)
+                    _r["stake_pct"] = _r["stake_pct"] * 0.5
 
                 rev_rows = []
                 rev_total = 0.0
