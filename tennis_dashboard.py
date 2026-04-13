@@ -194,7 +194,8 @@ with tab2:
             for kw in ["WIMBLEDON","WIMB","WMEN","WWOM","GRASS","QUEENS","HALLE","EASTBOURNE"]:
                 if kw in keys: return "Grass"
             for kw in ["MONTE CARLO","MONTE-CARLO","MADRID","ROME","ITALIAN","ROLAND","CLAY",
-                       "BARCELONA","HAMBURG","ESTORIL","BUCHAREST","MARRAKECH","LINZ"]:
+                       "BARCELONA","HAMBURG","ESTORIL","BUCHAREST","MARRAKECH","LINZ",
+                       "MUNICH","STUTTGART","ROUEN","LYON","GENEVA","STRASBOURG"]:
                 if kw in keys: return "Clay"
             return "Hard"
 
