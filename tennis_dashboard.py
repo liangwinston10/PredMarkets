@@ -58,16 +58,18 @@ def _cached_form(player_name: str):
     return _pf.fetch_recent_form(player_name)
 
 
-def _form_blend_dash(comp_p1: float, form1, form2):
-    """80/20 blend of composite toward recent win-rate ratio. Returns None if form unavailable."""
-    if form1 is None or form2 is None:
+def _form_blend_dash(comp_p1: float, form1, form2, qs1=None, qs2=None):
+    """80/20 blend of composite toward form ratio. Uses quality-adjusted scores when available."""
+    c1_raw = (form1.get("win_rate_30d") if form1.get("n_30d", 0) >= 3
+              else form1.get("win_rate_60d")) if form1 else None
+    c2_raw = (form2.get("win_rate_30d") if form2.get("n_30d", 0) >= 3
+              else form2.get("win_rate_60d")) if form2 else None
+    c1 = qs1 if qs1 is not None else c1_raw
+    c2 = qs2 if qs2 is not None else c2_raw
+    if c1 is None or c2 is None:
         return None
-    wr1 = form1.get("win_rate_30d") if form1.get("n_30d", 0) >= 3 else form1.get("win_rate_60d")
-    wr2 = form2.get("win_rate_30d") if form2.get("n_30d", 0) >= 3 else form2.get("win_rate_60d")
-    if wr1 is None or wr2 is None:
-        return None
-    c1 = max(0.10, min(0.90, wr1))
-    c2 = max(0.10, min(0.90, wr2))
+    c1 = max(0.10, min(0.90, c1))
+    c2 = max(0.10, min(0.90, c2))
     return max(0.001, min(0.999, 0.80 * comp_p1 + 0.20 * (c1 / (c1 + c2))))
 
 
@@ -344,7 +346,12 @@ with tab2:
                             # Form adjustment (ESPN velocity, 20% weight)
                             _form_fav = _cached_form(p1)
                             _form_dog = _cached_form(p2)
-                            _fadj_val = _form_blend_dash(comp_val, _form_fav, _form_dog)
+                            from tools.player_form import enrich_form_quality as _efq
+                            _elo_map  = eng["elo_ratings"] if eng else {}
+                            _qs_fav   = _efq(_form_fav, _elo_map.get(p1, 1500), _elo_map)
+                            _qs_dog   = _efq(_form_dog, _elo_map.get(p2, 1500), _elo_map)
+                            _fadj_val = _form_blend_dash(comp_val, _form_fav, _form_dog,
+                                                         qs1=_qs_fav, qs2=_qs_dog)
                             if _fadj_val is not None:
                                 form_adj_str = f"{_fadj_val*100:.1f}%"
                                 form_adj_edge_str = f"{(_fadj_val - mkt_prob)*100:+.1f}%"
@@ -358,8 +365,19 @@ with tab2:
                                 signal = "VALUE"
                             else:
                                 signal = "~"
-                            if signal not in ("REVERSE", "CONFLICT") and edge_val is not None and edge_val > 0 \
-                                    and _ev_tk not in _sized_events:
+                            _vol = int(parse_volume(m))
+                            # VALUE filters: volume floor, all available signals agree with comp
+                            # direction, no missing opponent form on large edges
+                            _val_ok = (
+                                signal not in ("REVERSE", "CONFLICT")
+                                and edge_val is not None and edge_val > 0
+                                and _ev_tk not in _sized_events
+                                and _vol >= 2000                                              # F2: volume floor
+                                and (sim_val is None or sim_val > mkt_prob)                  # F3: sim agrees
+                                and (_fadj_val is None or _fadj_val > mkt_prob)              # F3: form-adj agrees
+                                and not (_form_dog is None and edge_val > 0.05)              # F4: no missing opp form on large edge
+                            )
+                            if _val_ok:
                                 _sized_events.add(_ev_tk)
                                 sizing_feed.append({
                                     "match_id":   f"{fav} vs {dog}",
@@ -370,14 +388,24 @@ with tab2:
                                     "round":      rnd,
                                     "p_model":    comp_val,
                                     "p_market":   mkt_prob,
-                                    "vol":        int(parse_volume(m)),
+                                    "vol":        _vol,
                                     "form_fav":   _form_fav,
                                     "form_dog":   _form_dog,
                                     "sim_val":    sim_val,
                                     "fadj_val":   _fadj_val,
                                 })
-                            if signal == "REVERSE" and comp_val is not None and mkt_prob is not None \
-                                    and _ev_tk not in _sized_events:
+                            # REVERSE filters: volume floor, model gives underdog ≥60%,
+                            # all available signals agree underdog wins
+                            _rev_ok = (
+                                signal == "REVERSE"
+                                and comp_val is not None and mkt_prob is not None
+                                and _ev_tk not in _sized_events
+                                and _vol >= 2000                                              # F2: volume floor
+                                and comp_val <= 0.43                                          # model gives underdog ≥57%
+                                and (sim_val is None or sim_val < mkt_prob)                  # F3: sim agrees
+                                and _fadj_val is not None and _fadj_val < mkt_prob           # form-adj required and must confirm
+                            )
+                            if _rev_ok:
                                 _sized_events.add(_ev_tk)
                                 reverse_feed.append({
                                     "match_id":   f"{dog} vs {fav} (No)",
@@ -388,7 +416,7 @@ with tab2:
                                     "round":      rnd,
                                     "p_model":    1 - comp_val,
                                     "p_market":   1 - mkt_prob,
-                                    "vol":        int(parse_volume(m)),
+                                    "vol":        _vol,
                                     "form_fav":   _form_dog,
                                     "form_dog":   _form_fav,
                                     "sim_val":    (1 - sim_val) if sim_val is not None else None,
@@ -722,10 +750,15 @@ with tab3:
             sim_p1   = result.get("sim_p1")
             elo_diff = result["elo_diff_abs"]
 
-            # Fetch form and compute form-adj
+            # Fetch form and compute quality-adjusted form-adj
             _form1_t3 = _cached_form(p1_name)
             _form2_t3 = _cached_form(p2_name)
-            form_adj_t3 = _form_blend_dash(comp_p1, _form1_t3, _form2_t3)
+            from tools.player_form import enrich_form_quality as _efq_t3
+            _elo_map_t3 = engine["elo_ratings"] if engine else {}
+            _qs1_t3 = _efq_t3(_form1_t3, _elo_map_t3.get(p1_name, 1500), _elo_map_t3)
+            _qs2_t3 = _efq_t3(_form2_t3, _elo_map_t3.get(p2_name, 1500), _elo_map_t3)
+            form_adj_t3 = _form_blend_dash(comp_p1, _form1_t3, _form2_t3,
+                                           qs1=_qs1_t3, qs2=_qs2_t3)
 
             # ── Three-indicator summary ────────────────────────────────────────
             st.divider()

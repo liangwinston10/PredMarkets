@@ -23,7 +23,7 @@ _tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 try:
-    from tools.player_form import fetch_recent_form, format_form_line as _fmt_form
+    from tools.player_form import fetch_recent_form, format_form_line as _fmt_form, enrich_form_quality as _enrich_form_quality
     _form_available = True
 except ImportError:
     _form_available = False
@@ -46,16 +46,15 @@ TML_URL  = "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/{
 #   CUTOFF_DATE = pd.Timestamp("2025-01-15")
 CUTOFF_DATE = pd.Timestamp(datetime.date.today())
 
-# Per-surface weights (from per-surface grid search over 30K matches)
-# Per-surface weights (scipy SLSQP optimized, 2015-2026 data, 6 components)
+# Per-surface weights (scipy SLSQP optimized on OOS 2023-2024 test set — avoids in-sample overfitting)
 SURFACE_WEIGHTS = {
-    "Hard":  {"return": 0.104, "elo": 0.297, "surf_elo": 0.212, "rank": 0.143, "ace": 0.245},
-    "Clay":  {"return": 0.146, "elo": 0.082, "surf_elo": 0.537, "rank": 0.235},
-    "Grass": {"elo": 0.189, "rank": 0.037, "ace": 0.763},
+    "Hard":  {"return": 0.105, "elo": 0.167, "surf_elo": 0.220, "rank": 0.115, "ace": 0.394},
+    "Clay":  {"return": 0.088, "elo": 0.034, "surf_elo": 0.540, "rank": 0.300, "df_rate": 0.038},
+    "Grass": {"elo": 0.195, "rank": 0.032, "ace": 0.773},
 }
-DEFAULT_WEIGHTS = {"return": 0.134, "elo": 0.210, "surf_elo": 0.318, "rank": 0.161, "ace": 0.177}
+DEFAULT_WEIGHTS = {"return": 0.135, "elo": 0.166, "surf_elo": 0.251, "rank": 0.134, "ace": 0.313}
 
-FORM_BLEND_WEIGHT = 0.20   # form nudge weight (unvalidated — composite is 30K-calibrated)
+FORM_BLEND_WEIGHT = 0.20   # gate/display weight — form-adj shown for conflict detection, comp used for sizing
 FORM_MIN_MATCHES  = 3      # use 30d window only if >= this many matches
 FORM_FLOOR        = 0.10   # clip win rates to [FLOOR, 1-FLOOR] before ratio
 
@@ -67,13 +66,15 @@ POP_BP       = 0.62
 POP_FORM     = 0.50
 POP_ACE_RATE = 0.065
 POP_SS_WON   = 0.50
+POP_DF_RATE  = 0.048
 ELO_START    = 1500
 ELO_K        = 32
 
-SKILL_LEN  = 100
-FORM_LEN   = 30
-FORM_DECAY = 0.9
-STAT_PRIOR = 10
+SKILL_LEN      = 100
+SURF_SKILL_LEN = 40   # surface-specific window (matches backtest.py)
+FORM_LEN       = 30
+FORM_DECAY     = 0.9
+STAT_PRIOR     = 10
 
 EDGE_THRESHOLD = 0.04
 
@@ -204,16 +205,19 @@ def bo5_adjust(p: float) -> float:
     return p**3 * (1 + 3*q + 6*q**2)
 
 
-def form_blend(comp_p1: float, form1: dict | None, form2: dict | None) -> float | None:
-    """Nudge comp_p1 toward form win-rate ratio. Returns None if form unavailable."""
-    if form1 is None or form2 is None:
+def form_blend(comp_p1: float, form1: dict | None, form2: dict | None,
+               qs1: float | None = None, qs2: float | None = None) -> float | None:
+    """Nudge comp_p1 toward form ratio. Uses quality-adjusted scores when available."""
+    c1_raw = (form1.get("win_rate_30d") if form1.get("n_30d", 0) >= FORM_MIN_MATCHES
+              else form1.get("win_rate_60d")) if form1 else None
+    c2_raw = (form2.get("win_rate_30d") if form2.get("n_30d", 0) >= FORM_MIN_MATCHES
+              else form2.get("win_rate_60d")) if form2 else None
+    c1 = qs1 if qs1 is not None else c1_raw
+    c2 = qs2 if qs2 is not None else c2_raw
+    if c1 is None or c2 is None:
         return None
-    wr1 = form1.get("win_rate_30d") if form1.get("n_30d", 0) >= FORM_MIN_MATCHES else form1.get("win_rate_60d")
-    wr2 = form2.get("win_rate_30d") if form2.get("n_30d", 0) >= FORM_MIN_MATCHES else form2.get("win_rate_60d")
-    if wr1 is None or wr2 is None:
-        return None
-    c1 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr1))
-    c2 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr2))
+    c1 = max(FORM_FLOOR, min(1 - FORM_FLOOR, c1))
+    c2 = max(FORM_FLOOR, min(1 - FORM_FLOOR, c2))
     ratio = c1 / (c1 + c2)
     return max(0.001, min(0.999, (1 - FORM_BLEND_WEIGHT) * comp_p1 + FORM_BLEND_WEIGHT * ratio))
 
@@ -247,11 +251,13 @@ def _decayed_mean(values: list, pop_avg: float) -> float:
 
 def build_player_stats(df: pd.DataFrame):
     """Build rolling stats from a DataFrame (chronological order assumed).
-    Uses dual-deque design: all-surface skill deque (SGW/BP) + surface-specific
-    form deque (win%) with exponential decay weighting.
+    Three-deque design: all-surface skill deque (SGW/BP/df_rate),
+    surface-specific skill deque (SGW/ace for sim inputs), and
+    surface-specific form deque (win%) with exponential decay weighting.
     """
-    skill_deques: dict = collections.defaultdict(lambda: collections.deque(maxlen=SKILL_LEN))
-    form_deques:  dict = collections.defaultdict(lambda: collections.deque(maxlen=FORM_LEN))
+    skill_deques:      dict = collections.defaultdict(lambda: collections.deque(maxlen=SKILL_LEN))
+    surf_skill_deques: dict = collections.defaultdict(lambda: collections.deque(maxlen=SURF_SKILL_LEN))
+    form_deques:       dict = collections.defaultdict(lambda: collections.deque(maxlen=FORM_LEN))
     last_date: dict = {}
 
     def safe(v):
@@ -269,6 +275,7 @@ def build_player_stats(df: pd.DataFrame):
         bpsaved_v = safe(row.get(f"{prefix}bpSaved"))
         bpfaced_v = safe(row.get(f"{prefix}bpFaced"))
         ace_v     = safe(row.get(f"{prefix}ace"))
+        df_v      = safe(row.get(f"{prefix}df"))
 
         sgw = None
         if svpt_v and svpt_v > 0 and f_in_v is not None and f_won_v is not None and s_won_v is not None:
@@ -285,8 +292,10 @@ def build_player_stats(df: pd.DataFrame):
         ace_rate = (ace_v / svpt_v) if (ace_v is not None and svpt_v and svpt_v > 0) else None
         ss_second = (svpt_v - f_in_v) if (svpt_v and f_in_v is not None) else None
         ss_won = (s_won_v / ss_second) if (ss_second and ss_second > 0 and s_won_v is not None) else None
+        df_rate = (df_v / svpt_v) if (df_v is not None and svpt_v and svpt_v > 0) else None
 
-        skill_deques[pname].append({"sgw": sgw, "bp": bp, "ace_rate": ace_rate, "ss_won": ss_won})
+        skill_deques[pname].append({"sgw": sgw, "bp": bp, "ace_rate": ace_rate, "ss_won": ss_won, "df_rate": df_rate})
+        surf_skill_deques[(pname, surface)].append({"sgw": sgw, "ace_rate": ace_rate})
         form_deques[(pname, surface)].append({"win": 1 if win else 0})
         last_date[pname] = date
 
@@ -302,19 +311,31 @@ def build_player_stats(df: pd.DataFrame):
         update(lname, surface, date, False, row, "l_")
 
     def get_stats(pname, surface):
-        skill = skill_deques[pname]
-        form  = list(form_deques[(pname, surface)])
+        skill      = skill_deques[pname]
+        surf_skill = surf_skill_deques[(pname, surface)]
+        form       = list(form_deques[(pname, surface)])
+
         sgws      = [s["sgw"]      for s in skill if s["sgw"]           is not None]
         bps       = [s["bp"]       for s in skill if s["bp"]            is not None]
         ace_rates = [s["ace_rate"] for s in skill if s.get("ace_rate")  is not None]
         ss_wons   = [s["ss_won"]   for s in skill if s.get("ss_won")    is not None]
+        df_rates  = [s["df_rate"]  for s in skill if s.get("df_rate")   is not None]
         wins      = [s["win"]      for s in form]
+
+        all_sgw_mean = _shrink(sgws,      POP_SGW)
+        all_ace_mean = _shrink(ace_rates, POP_ACE_RATE)
+        surf_sgws    = [s["sgw"]      for s in surf_skill if s["sgw"]      is not None]
+        surf_aces    = [s["ace_rate"] for s in surf_skill if s.get("ace_rate") is not None]
+
         return {
-            "sgw":      _shrink(sgws,      POP_SGW),
+            "sgw":      all_sgw_mean,
             "bp":       _shrink(bps,       POP_BP),
             "form":     _decayed_mean(wins, POP_FORM),
-            "ace_rate": _shrink(ace_rates, POP_ACE_RATE),
+            "ace_rate": all_ace_mean,
             "ss_won":   _shrink(ss_wons,   POP_SS_WON),
+            "df_rate":  _shrink(df_rates,  POP_DF_RATE),
+            "sgw_surf": _shrink(surf_sgws, all_sgw_mean),   # surface-specific, for simulation
+            "ace_surf": _shrink(surf_aces, all_ace_mean),
         }
 
     return get_stats, last_date
@@ -382,22 +403,25 @@ def predict(p1_name, p2_name, surface, best_of, market_p1,
     fat2 = fatigue_multiplier(days_since(last2))
 
     w = SURFACE_WEIGHTS.get(surface, DEFAULT_WEIGHTS)
+    # df_rate is a negative signal: use (1 - df_rate) so higher df → lower score
     sc1 = (w.get("return",   0) * rgw1
          + w.get("elo",      0) * elo_p
          + w.get("surf_elo", 0) * surf_elo_p
          + w.get("rank",     0) * rank_p
-         + w.get("ace",      0) * s1["ace_rate"]) * fat1
+         + w.get("ace",      0) * s1["ace_rate"]
+         + w.get("df_rate",  0) * (1 - s1["df_rate"])) * fat1
     sc2 = (w.get("return",   0) * rgw2
          + w.get("elo",      0) * (1-elo_p)
          + w.get("surf_elo", 0) * (1-surf_elo_p)
          + w.get("rank",     0) * (1-rank_p)
-         + w.get("ace",      0) * s2["ace_rate"]) * fat2
+         + w.get("ace",      0) * s2["ace_rate"]
+         + w.get("df_rate",  0) * (1 - s2["df_rate"])) * fat2
 
     raw_p1 = sc1 / (sc1 + sc2) if (sc1 + sc2) > 0 else 0.5
 
-    # Simulation-based probability — invert sgw to point-level probability first
-    p_serve_1 = (sgw_to_point_prob(s1["sgw"]) + (1 - sgw_to_point_prob(s2["sgw"]))) / 2
-    p_serve_2 = (sgw_to_point_prob(s2["sgw"]) + (1 - sgw_to_point_prob(s1["sgw"]))) / 2
+    # Simulation — use surface-specific SGW for more accurate per-surface point probabilities
+    p_serve_1 = (sgw_to_point_prob(s1["sgw_surf"]) + (1 - sgw_to_point_prob(s2["sgw_surf"]))) / 2
+    p_serve_2 = (sgw_to_point_prob(s2["sgw_surf"]) + (1 - sgw_to_point_prob(s1["sgw_surf"]))) / 2
     sim = run_simulation(p_serve_1, p_serve_2, best_of=best_of, n_sims=10_000)
 
     # H2H shrinkage
@@ -506,6 +530,11 @@ def display(p1_name, p2_name, surface, best_of, result, market_p1, sizing=None, 
         if sig == "BET":
             cap_str = f"edge cap {sizing['edge_cap']:.1%}  |  headroom {sizing['remaining_capacity']:.1%}"
             lines.append(f"║  {'':22} {cap_str:<{W-26}}║")
+        conf_sc = sizing.get("conf_scalar", 1.0)
+        sim_conf = sizing.get("sim_confidence")
+        if sim_conf is not None:
+            conf_str = f"sim conf {sim_conf:.2f}  →  kelly scalar {conf_sc:.2f}"
+            lines.append(f"║  {'Confidence':<22} {conf_str:<{W-26}}║")
         lines.append(f"╠{'═'*W}╣")
 
     comp_label = f"  Component breakdown:"
@@ -756,6 +785,8 @@ def main():
                 bankroll=bankroll,
                 current_exposure=current_exposure,
                 round_stage=round_raw,
+                sim_confidence=result.get("sim_confidence"),
+                surface=surface_raw,
             )
 
         form1 = form2 = None
@@ -763,7 +794,12 @@ def main():
             form1 = fetch_recent_form(p1_name)
             form2 = fetch_recent_form(p2_name)
 
-        form_adj = form_blend(result["comp_p1"], form1, form2)
+        qs1 = qs2 = None
+        if _form_available:
+            qs1 = _enrich_form_quality(form1, elo_ratings.get(p1_name, 1500), elo_ratings)
+            qs2 = _enrich_form_quality(form2, elo_ratings.get(p2_name, 1500), elo_ratings)
+
+        form_adj = form_blend(result["comp_p1"], form1, form2, qs1=qs1, qs2=qs2)
         display(p1_name, p2_name, surface_raw, best_of, result, market_p1, sizing, form1, form2, form_adj)
 
         if sizing and sizing["signal"] == "BET":

@@ -150,6 +150,54 @@ def _parse_note(note: str, player_name: str) -> dict | None:
     return None
 
 
+# ── Opponent quality helpers ──────────────────────────────────────────────────
+
+def _find_elo(last_name: str, elo_map: dict) -> float | None:
+    """
+    Match an opponent last name (from ESPN) to a full player name in elo_map.
+    Returns the Elo float if exactly one player matches, else None.
+    """
+    last_lower = last_name.lower()
+    hits = [elo for name, elo in elo_map.items()
+            if name.lower().split()[-1] == last_lower]
+    return hits[0] if len(hits) == 1 else None
+
+
+def enrich_form_quality(form: dict | None, player_elo: float,
+                        elo_map: dict, n: int = 10) -> float | None:
+    """
+    Compute a quality-adjusted form score from an already-fetched form dict.
+
+    For each of the last n matches where the opponent's Elo can be matched:
+      expected = P(player wins) via the standard Elo formula
+      actual   = 1 if W, 0 if L
+      diff     = actual - expected
+
+    Returns 0.5 + mean(diffs), clamped to [0.05, 0.95].
+      0.5  = performing exactly as Elo predicts
+      >0.5 = outperforming Elo expectations (hot form vs quality)
+      <0.5 = underperforming Elo expectations (cold form vs quality)
+
+    Returns None if fewer than 3 opponent Elos can be matched — callers
+    should fall back to raw win rate in that case.
+    """
+    if not form:
+        return None
+    opps    = form.get("opponents", [])[:n]
+    results = form.get("results",   [])[:n]
+    diffs   = []
+    for opp_last, result in zip(opps, results):
+        opp_elo = _find_elo(opp_last, elo_map)
+        if opp_elo is None:
+            continue
+        expected = 1.0 / (1.0 + 10 ** ((opp_elo - player_elo) / 400))
+        actual   = 1.0 if result == "W" else 0.0
+        diffs.append(actual - expected)
+    if len(diffs) < 3:
+        return None
+    return max(0.05, min(0.95, 0.5 + sum(diffs) / len(diffs)))
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def fetch_recent_form(player_name: str, n: int = 10) -> dict | None:

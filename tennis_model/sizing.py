@@ -20,6 +20,15 @@ DAILY_CAP_BY_ROUND: dict[str, float] = {
     "F":    0.12,
 }
 
+# Simulation confidence thresholds by surface.
+# confidence = P(straight-set win) / P(A wins).  Below threshold → scalar < 1.0.
+# Clay threshold is lower because clay inherently produces more 3-setters.
+CONF_THRESHOLD: dict[str, float] = {
+    "Hard":  0.60,
+    "Clay":  0.50,
+    "Grass": 0.62,
+}
+
 # ── Core sizing function ───────────────────────────────────────────────────────
 
 def size_bet(
@@ -30,6 +39,8 @@ def size_bet(
     round_stage: str = "R32",
     kelly_fraction: float = KELLY_FRACTION,
     edge_threshold: float = EDGE_THRESHOLD,
+    sim_confidence: float | None = None,
+    surface: str = "Hard",
 ) -> dict:
     """
     Compute bet size for a single match.
@@ -50,6 +61,11 @@ def size_bet(
         Fractional Kelly multiplier (default 0.125 = ⅛ Kelly).
     edge_threshold : float
         Minimum edge required to place a bet (default 0.04).
+    sim_confidence : float | None
+        Simulation confidence: P(straight-set win) / P(A wins). When provided,
+        Kelly stake is scaled down proportionally if below the surface threshold.
+    surface : str
+        "Hard", "Clay", or "Grass" — selects the confidence threshold.
 
     Returns
     -------
@@ -58,11 +74,13 @@ def size_bet(
         stake_pct       – fraction of bankroll
         edge            – p_model - p_market
         kelly_raw       – full Kelly fraction
-        kelly_frac      – fractional Kelly value
+        kelly_frac      – fractional Kelly value (after confidence scalar)
         edge_cap        – per-match cap from edge formula
         daily_cap       – applicable daily cap for this round
         remaining_capacity – daily cap headroom
         signal          – "BET", "NO_EDGE", or "CAP_BOUND"
+        conf_scalar     – confidence multiplier applied to Kelly (1.0 if no sim)
+        sim_confidence  – echo of input (None if not provided)
     """
     edge = p_model - p_market
     daily_cap = DAILY_CAP_BY_ROUND.get(round_stage.upper(), 0.18)
@@ -80,11 +98,20 @@ def size_bet(
             "daily_cap": daily_cap,
             "remaining_capacity": remaining_capacity,
             "signal": "NO_EDGE",
+            "conf_scalar": 1.0,
+            "sim_confidence": sim_confidence,
         }
 
     # Layer 1: Kelly criterion
     kelly_raw = edge / (1 - p_market)
-    kelly_frac = kelly_raw * kelly_fraction
+
+    # Layer 1b: simulation confidence scalar
+    conf_scalar = 1.0
+    if sim_confidence is not None:
+        threshold = CONF_THRESHOLD.get(surface, 0.58)
+        conf_scalar = min(1.0, sim_confidence / threshold)
+
+    kelly_frac = kelly_raw * kelly_fraction * conf_scalar
 
     # Layer 2: edge-proportional per-match cap
     edge_cap = min(0.05, 0.005 + edge * 0.5)
@@ -106,6 +133,8 @@ def size_bet(
         "daily_cap": daily_cap,
         "remaining_capacity": remaining_capacity,
         "signal": signal,
+        "conf_scalar": conf_scalar,
+        "sim_confidence": sim_confidence,
     }
 
 
@@ -154,6 +183,8 @@ def size_day(
             current_exposure=current_exposure,
             round_stage=round_stage,
             kelly_fraction=kelly_fraction,
+            sim_confidence=m.get("sim_confidence"),
+            surface=m.get("surface", "Hard"),
         )
         if sizing["signal"] == "BET":
             current_exposure += sizing["stake_pct"]

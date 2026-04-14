@@ -92,6 +92,9 @@ def load_stats(engine: dict) -> dict:
                 "form":     live.POP_FORM,
                 "ace_rate": live.POP_ACE_RATE,
                 "ss_won":   live.POP_SS_WON,
+                "df_rate":  live.POP_DF_RATE,
+                "sgw_surf": live.POP_SGW,
+                "ace_surf": live.POP_ACE_RATE,
             }
         last_date = {}
 

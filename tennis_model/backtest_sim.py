@@ -112,10 +112,14 @@ def main():
     # ── Run vectorized simulation ─────────────────────────────────────────────
     print(f"Running vectorized simulation ({N_SIMS} sims/match)...")
 
-    sgw1    = df["sgw1"].values
-    sgw2    = df["sgw2"].values
+    # Use surface-specific SGW if available (from surf_skill_deques), else fall back to all-surface
+    sgw1 = df["sgw1_surf"].values if "sgw1_surf" in df.columns else df["sgw1"].values
+    sgw2 = df["sgw2_surf"].values if "sgw2_surf" in df.columns else df["sgw2"].values
     best_of = df["best_of"].fillna(3).astype(int).values
     comp_p  = df["comp_win_prob"].values
+
+    src = "surface-specific SGW" if "sgw1_surf" in df.columns else "all-surface SGW (fallback)"
+    print(f"  Using {src} for simulation inputs")
 
     pp_w = np.array([sgw_to_point_prob(v) for v in sgw1])
     pp_l = np.array([sgw_to_point_prob(v) for v in sgw2])

@@ -21,13 +21,13 @@ YEARS    = list(range(2015, datetime.date.today().year + 1))  # auto-includes cu
 BASE_URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{year}.csv"
 TML_URL  = "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/{year}.csv"
 
-# Per-surface weights (scipy SLSQP optimized, 2015-2026 data, 6 components)
+# Per-surface weights (scipy SLSQP optimized on OOS 2023-2024 test set — avoids in-sample overfitting)
 SURFACE_WEIGHTS = {
-    "Hard":  {"return": 0.104, "elo": 0.297, "surf_elo": 0.212, "rank": 0.143, "ace": 0.245},
-    "Clay":  {"return": 0.146, "elo": 0.082, "surf_elo": 0.537, "rank": 0.235},
-    "Grass": {"elo": 0.189, "rank": 0.037, "ace": 0.763},  # ace dominates on grass
+    "Hard":  {"return": 0.105, "elo": 0.167, "surf_elo": 0.220, "rank": 0.115, "ace": 0.394},
+    "Clay":  {"return": 0.088, "elo": 0.034, "surf_elo": 0.540, "rank": 0.300, "df_rate": 0.038},
+    "Grass": {"elo": 0.195, "rank": 0.032, "ace": 0.773},
 }
-DEFAULT_WEIGHTS = {"return": 0.134, "elo": 0.210, "surf_elo": 0.318, "rank": 0.161, "ace": 0.177}
+DEFAULT_WEIGHTS = {"return": 0.135, "elo": 0.166, "surf_elo": 0.251, "rank": 0.134, "ace": 0.313}
 
 # Population fallback averages
 POP_SGW      = 0.62
@@ -36,14 +36,17 @@ POP_BP       = 0.62
 POP_FORM     = 0.50
 POP_ACE_RATE = 0.065   # ~6.5% of serve points are aces (ATP average)
 POP_SS_WON   = 0.50    # ~50% of second serve points won
+POP_DF_RATE  = 0.048   # ~4.8% double fault rate (ATP average)
+POP_BP_CONV  = 0.42    # ~42% break point conversion rate (ATP average)
 
 # Elo settings
 ELO_K      = 32
 ELO_START  = 1500
 
 # Rolling window sizes
-SKILL_LEN = 100   # all-surface window for SGW/BP (stable skill metrics, surface-transferable)
-FORM_LEN  = 30    # surface-specific window for win% (form, shorter = more responsive)
+SKILL_LEN      = 100  # all-surface window for SGW/BP (stable skill metrics, surface-transferable)
+SURF_SKILL_LEN = 40   # surface-specific SGW/ace window (used by simulation engine)
+FORM_LEN       = 30   # surface-specific window for win% (form, shorter = more responsive)
 
 # Exponential decay for form: weight recent matches more heavily
 # 0.9^10 ≈ 0.35, so a match 10 ago has 35% weight of the most recent
@@ -133,16 +136,19 @@ def _decayed_mean(values: list, pop_avg: float) -> float:
 
 
 class PlayerStats:
-    """Two-deque design:
-    - skill_deques[player_name]:          all-surface SGW/BP (SKILL_LEN window)
-    - form_deques[(player_name, surface)]: surface win%      (FORM_LEN  window, decayed)
-    Separating these lets skill metrics accumulate cross-surface while form stays
-    surface-specific and recent.
+    """Three-deque design:
+    - skill_deques[player_name]:            all-surface SGW/BP (SKILL_LEN window)
+    - surf_skill_deques[(player, surface)]: surface-specific SGW/ace (SURF_SKILL_LEN window)
+    - form_deques[(player_name, surface)]:  surface win%      (FORM_LEN  window, decayed)
+    surf_skill is used by the simulation engine for surface-specific p_serve inputs.
     """
 
     def __init__(self):
         self.skill_deques: dict = collections.defaultdict(
             lambda: collections.deque(maxlen=SKILL_LEN)
+        )
+        self.surf_skill_deques: dict = collections.defaultdict(
+            lambda: collections.deque(maxlen=SURF_SKILL_LEN)
         )
         self.form_deques: dict = collections.defaultdict(
             lambda: collections.deque(maxlen=FORM_LEN)
@@ -150,24 +156,38 @@ class PlayerStats:
         self.last_date: dict = {}
 
     def get_stats(self, player_name: str, surface: str) -> dict:
-        skill = self.skill_deques[player_name]
-        form  = list(self.form_deques[(player_name, surface)])
+        skill      = self.skill_deques[player_name]
+        surf_skill = self.surf_skill_deques[(player_name, surface)]
+        form       = list(self.form_deques[(player_name, surface)])
 
-        sgws     = [s["sgw"]      for s in skill if s["sgw"]      is not None]
-        bps      = [s["bp"]       for s in skill if s["bp"]       is not None]
-        ace_rates= [s["ace_rate"] for s in skill if s.get("ace_rate") is not None]
-        ss_wons  = [s["ss_won"]   for s in skill if s.get("ss_won")   is not None]
-        wins     = [s["win"]      for s in form]
+        sgws      = [s["sgw"]      for s in skill if s["sgw"]      is not None]
+        bps       = [s["bp"]       for s in skill if s["bp"]       is not None]
+        ace_rates = [s["ace_rate"] for s in skill if s.get("ace_rate") is not None]
+        ss_wons   = [s["ss_won"]   for s in skill if s.get("ss_won")   is not None]
+        df_rates  = [s["df_rate"]  for s in skill if s.get("df_rate")  is not None]
+        bp_convs  = [s["bp_conv"]  for s in skill if s.get("bp_conv")  is not None]
+        wins      = [s["win"]      for s in form]
+
+        # Surface-specific SGW/ace — shrink toward all-surface mean (better anchor than population)
+        all_sgw_mean = _shrink(sgws, POP_SGW)
+        all_ace_mean = _shrink(ace_rates, POP_ACE_RATE)
+        surf_sgws    = [s["sgw"]      for s in surf_skill if s["sgw"]      is not None]
+        surf_aces    = [s["ace_rate"] for s in surf_skill if s.get("ace_rate") is not None]
 
         return {
-            "sgw":      _shrink(sgws,      POP_SGW),
+            "sgw":      all_sgw_mean,
             "bp":       _shrink(bps,       POP_BP),
             "form":     _decayed_mean(wins, POP_FORM),
-            "ace_rate": _shrink(ace_rates, POP_ACE_RATE),
+            "ace_rate": all_ace_mean,
             "ss_won":   _shrink(ss_wons,   POP_SS_WON),
+            "df_rate":  _shrink(df_rates,  POP_DF_RATE),
+            "bp_conv":  _shrink(bp_convs,  POP_BP_CONV),
+            "sgw_surf": _shrink(surf_sgws, all_sgw_mean),   # surface-specific, for simulation
+            "ace_surf": _shrink(surf_aces, all_ace_mean),   # surface-specific ace rate
         }
 
-    def update(self, player_name: str, surface: str, match_date, win: bool, row, prefix: str):
+    def update(self, player_name: str, surface: str, match_date, win: bool, row, prefix: str,
+               opp_prefix: str = ""):
         def safe(v):
             try:
                 f = float(v)
@@ -182,6 +202,7 @@ class PlayerStats:
         bpsaved_v = safe(row.get(f"{prefix}bpSaved"))
         bpfaced_v = safe(row.get(f"{prefix}bpFaced"))
         ace_v   = safe(row.get(f"{prefix}ace"))
+        df_v    = safe(row.get(f"{prefix}df"))
 
         sgw = None
         if svpt_v and svpt_v > 0 and f_in_v is not None and f_won_v is not None and s_won_v is not None:
@@ -200,7 +221,22 @@ class PlayerStats:
         ss_second = (svpt_v - f_in_v) if (svpt_v and f_in_v is not None) else None
         ss_won = (s_won_v / ss_second) if (ss_second and ss_second > 0 and s_won_v is not None) else None
 
-        self.skill_deques[player_name].append({"sgw": sgw, "bp": bp, "ace_rate": ace_rate, "ss_won": ss_won})
+        # Double fault rate: df / svpt (serve reliability under pressure)
+        df_rate = (df_v / svpt_v) if (df_v is not None and svpt_v and svpt_v > 0) else None
+
+        # Break point conversion (receiver perspective): breaks won / opp break opportunities
+        bp_conv = None
+        if opp_prefix:
+            opp_bpfaced_v = safe(row.get(f"{opp_prefix}bpFaced"))
+            opp_bpsaved_v = safe(row.get(f"{opp_prefix}bpSaved"))
+            if opp_bpfaced_v and opp_bpfaced_v > 0 and opp_bpsaved_v is not None:
+                bp_conv = (opp_bpfaced_v - opp_bpsaved_v) / opp_bpfaced_v
+
+        self.skill_deques[player_name].append({
+            "sgw": sgw, "bp": bp, "ace_rate": ace_rate, "ss_won": ss_won,
+            "df_rate": df_rate, "bp_conv": bp_conv,
+        })
+        self.surf_skill_deques[(player_name, surface)].append({"sgw": sgw, "ace_rate": ace_rate})
         self.form_deques[(player_name, surface)].append({"win": 1 if win else 0})
         self.last_date[player_name] = match_date
 
@@ -217,6 +253,8 @@ def composite_win_prob(p1_stats, p2_stats, elo_p1, elo_p2, surf_elo_p, rank_p, s
     form1 = p1_stats["form"]; form2 = p2_stats["form"]
     ace1  = p1_stats["ace_rate"]; ace2  = p2_stats["ace_rate"]
     ss1   = p1_stats["ss_won"];   ss2   = p2_stats["ss_won"]
+    df1   = p1_stats["df_rate"];  df2   = p2_stats["df_rate"]
+    bpc1  = p1_stats["bp_conv"];  bpc2  = p2_stats["bp_conv"]
 
     elo_p = elo_expected(elo_p1, elo_p2)
 
@@ -229,18 +267,23 @@ def composite_win_prob(p1_stats, p2_stats, elo_p1, elo_p2, surf_elo_p, rank_p, s
     fat2 = fatigue_multiplier(days_since(p2_last_date, match_date))
 
     w = SURFACE_WEIGHTS.get(surface, DEFAULT_WEIGHTS)
+    # df_rate is a negative signal: higher df → lower score, so use (1 - df_rate)
     s1 = (w.get("return", 0)   * rgw1
         + w.get("elo", 0)      * elo_p
         + w.get("surf_elo", 0) * surf_elo_p
         + w.get("rank", 0)     * rank_p
         + w.get("ace", 0)      * ace1
-        + w.get("ss_won", 0)   * ss1)   * fat1
+        + w.get("ss_won", 0)   * ss1
+        + w.get("df_rate", 0)  * (1 - df1)
+        + w.get("bp_conv", 0)  * bpc1)  * fat1
     s2 = (w.get("return", 0)   * rgw2
         + w.get("elo", 0)      * (1-elo_p)
         + w.get("surf_elo", 0) * (1-surf_elo_p)
         + w.get("rank", 0)     * (1-rank_p)
         + w.get("ace", 0)      * ace2
-        + w.get("ss_won", 0)   * ss2)   * fat2
+        + w.get("ss_won", 0)   * ss2
+        + w.get("df_rate", 0)  * (1 - df2)
+        + w.get("bp_conv", 0)  * bpc2)  * fat2
 
     raw_p1 = s1 / (s1 + s2) if (s1 + s2) > 0 else 0.5
 
@@ -259,6 +302,8 @@ def composite_win_prob(p1_stats, p2_stats, elo_p1, elo_p2, surf_elo_p, rank_p, s
         "form1": form1, "form2": form2,
         "ace1": ace1,  "ace2": ace2,
         "ss_won1": ss1, "ss_won2": ss2,
+        "df_rate1": df1, "df_rate2": df2,
+        "bp_conv1": bpc1, "bp_conv2": bpc2,
         "fat1": fat1,  "fat2": fat2,
     }
 
@@ -369,10 +414,13 @@ def run_backtest():
 
         components.append({
             "sgw1":       comps["sgw1"],    "sgw2":    comps["sgw2"],
+            "sgw1_surf":  w_stats["sgw_surf"], "sgw2_surf": l_stats["sgw_surf"],
             "bp1":        comps["bp1"],     "bp2":     comps["bp2"],
             "form1":      comps["form1"],   "form2":   comps["form2"],
             "ace1":       comps["ace1"],    "ace2":    comps["ace2"],
             "ss_won1":    comps["ss_won1"], "ss_won2": comps["ss_won2"],
+            "df_rate1":   comps["df_rate1"], "df_rate2": comps["df_rate2"],
+            "bp_conv1":   comps["bp_conv1"], "bp_conv2": comps["bp_conv2"],
             "elo_p":      elo_p_winner,
             "surf_elo_p": surf_elo_p_winner,
             "rank_p":     rank_p_winner,
@@ -411,8 +459,8 @@ def run_backtest():
             update_elo(surf_elo[surface], wname, lname)
             surf_elo_n[surface][wname] += 1
             surf_elo_n[surface][lname] += 1
-        player_stats.update(wname, surface, match_date, win=True,  row=row.to_dict(), prefix="w_")
-        player_stats.update(lname, surface, match_date, win=False, row=row.to_dict(), prefix="l_")
+        player_stats.update(wname, surface, match_date, win=True,  row=row.to_dict(), prefix="w_", opp_prefix="l_")
+        player_stats.update(lname, surface, match_date, win=False, row=row.to_dict(), prefix="l_", opp_prefix="w_")
 
         # H2H update
         h2h[key][1] += 1
