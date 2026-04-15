@@ -373,7 +373,7 @@ with tab2:
                                 and edge_val is not None and edge_val > 0
                                 and _ev_tk not in _sized_events
                                 and _vol >= 2000                                              # F2: volume floor
-                                and (sim_val is None or sim_val > mkt_prob)                  # F3: sim agrees
+                                and (sim_val is None or (sim_val - mkt_prob) >= -0.03)       # F3: sim within -3pp of market
                                 and (_fadj_val is None or _fadj_val > mkt_prob)              # F3: form-adj agrees
                                 and not (_form_dog is None and edge_val > 0.05)              # F4: no missing opp form on large edge
                             )

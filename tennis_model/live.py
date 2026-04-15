@@ -54,7 +54,7 @@ SURFACE_WEIGHTS = {
 }
 DEFAULT_WEIGHTS = {"return": 0.135, "elo": 0.166, "surf_elo": 0.251, "rank": 0.134, "ace": 0.313}
 
-FORM_BLEND_WEIGHT = 0.20   # gate/display weight — form-adj shown for conflict detection, comp used for sizing
+FORM_BLEND_WEIGHT = 0.12   # gate/display weight — form-adj shown for conflict detection, comp used for sizing
 FORM_MIN_MATCHES  = 3      # use 30d window only if >= this many matches
 FORM_FLOOR        = 0.10   # clip win rates to [FLOOR, 1-FLOOR] before ratio
 
