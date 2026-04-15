@@ -600,6 +600,22 @@ def load_recent_data():
     df = pd.concat(frames).sort_values("tourney_date").reset_index(drop=True)
     df = df[df["tourney_date"] <= CUTOFF_DATE]
     print(f"  Using matches up to {CUTOFF_DATE.date()} ({len(df):,} total)")
+
+    # Supplement with Sofascore cache (covers matches after TML/Sackmann cutoff)
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serve_stats_cache.csv")
+    if os.path.exists(cache_path):
+        try:
+            sc = pd.read_csv(cache_path, parse_dates=["tourney_date"])
+            sc = sc[sc["tourney_date"] <= CUTOFF_DATE]
+            if not sc.empty:
+                tml_max = df["tourney_date"].max() if not df.empty else pd.Timestamp("2000-01-01")
+                sc_new = sc[sc["tourney_date"] > tml_max]
+                if not sc_new.empty:
+                    df = pd.concat([df, sc_new], ignore_index=True).sort_values("tourney_date").reset_index(drop=True)
+                    print(f"  + Sofascore cache: {len(sc_new):,} recent matches appended")
+        except Exception:
+            pass
+
     return df
 
 

@@ -42,7 +42,7 @@ def load_engine(elo_path: str = ELO_PATH) -> dict:
     except FileNotFoundError:
         pass  # Engine still works with default ELO_START
 
-    # Incremental Elo update for matches since last backtest
+    # Incremental Elo update for matches since last backtest (Sackmann/TML)
     if last_updated:
         since = pd.Timestamp(last_updated)
         if since.date() < datetime.date.today():
@@ -50,8 +50,24 @@ def load_engine(elo_path: str = ELO_PATH) -> dict:
                 new_df = live.fetch_matches_since(since)
                 if not new_df.empty:
                     live.apply_incremental_elo(new_df, elo_ratings, surf_elo_by_name, rank_pts_map)
+                    last_updated = new_df["tourney_date"].max().strftime("%Y-%m-%d")
             except Exception:
                 pass  # Non-fatal — predictions still work with existing Elos
+
+    # Sofascore fallback: update Elo + prime serve-stats cache when Sackmann is stale (>7 days)
+    if last_updated:
+        last_dt = datetime.date.fromisoformat(str(last_updated)[:10])
+        if (datetime.date.today() - last_dt).days > 7:
+            try:
+                _tools_dir = os.path.dirname(os.path.abspath(__file__))
+                if _tools_dir not in sys.path:
+                    sys.path.insert(0, _tools_dir)
+                from sofascore_stats import fetch_sofascore_matches_since  # noqa: E402
+                sc_df = fetch_sofascore_matches_since(last_dt)
+                if not sc_df.empty:
+                    live.apply_incremental_elo(sc_df, elo_ratings, surf_elo_by_name, rank_pts_map)
+            except Exception:
+                pass  # Non-fatal
 
     return {
         "elo_ratings":      elo_ratings,
