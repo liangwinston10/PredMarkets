@@ -401,7 +401,7 @@ with tab2:
                                 and comp_val is not None and mkt_prob is not None
                                 and _ev_tk not in _sized_events
                                 and _vol >= 2000                                              # F2: volume floor
-                                and comp_val <= 0.43                                          # model gives underdog ≥57%
+
                                 and (sim_val is None or (sim_val < 0.5 and sim_val < mkt_prob + 0.12))  # F3: sim agrees direction, within 12pp of market
                                 and _fadj_val is not None and _fadj_val < mkt_prob           # form-adj required and must confirm
                             )
