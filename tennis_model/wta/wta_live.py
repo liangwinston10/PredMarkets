@@ -27,7 +27,7 @@ _tools_dir = _os.path.join(_sim_dir, "..")
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 try:
-    from tools.player_form import fetch_recent_form, format_form_line as _fmt_form
+    from tools.player_form import fetch_recent_form, format_form_line as _fmt_form, enrich_form_quality as _enrich_form_quality
     _form_available = True
 except ImportError:
     _form_available = False
@@ -50,7 +50,7 @@ SURFACE_WEIGHTS = {
 }
 DEFAULT_WEIGHTS = {"elo": 0.315, "surf_elo": 0.159, "rank": 0.147, "ace": 0.379}
 
-FORM_BLEND_WEIGHT = 0.20
+FORM_BLEND_WEIGHT = 0.12
 FORM_MIN_MATCHES  = 3
 FORM_FLOOR        = 0.10
 
@@ -188,16 +188,19 @@ def fatigue_multiplier(days: Optional[float]) -> float:
     return 0.96
 
 
-def form_blend(comp_p1: float, form1: dict | None, form2: dict | None) -> float | None:
-    """Nudge comp_p1 toward form win-rate ratio. Returns None if form unavailable."""
-    if form1 is None or form2 is None:
+def form_blend(comp_p1: float, form1: dict | None, form2: dict | None,
+               qs1: float | None = None, qs2: float | None = None) -> float | None:
+    """Nudge comp_p1 toward form ratio. Uses quality-adjusted scores when available."""
+    c1_raw = (form1.get("win_rate_30d") if form1.get("n_30d", 0) >= FORM_MIN_MATCHES
+              else form1.get("win_rate_60d")) if form1 else None
+    c2_raw = (form2.get("win_rate_30d") if form2.get("n_30d", 0) >= FORM_MIN_MATCHES
+              else form2.get("win_rate_60d")) if form2 else None
+    c1 = qs1 if qs1 is not None else c1_raw
+    c2 = qs2 if qs2 is not None else c2_raw
+    if c1 is None or c2 is None:
         return None
-    wr1 = form1.get("win_rate_30d") if form1.get("n_30d", 0) >= FORM_MIN_MATCHES else form1.get("win_rate_60d")
-    wr2 = form2.get("win_rate_30d") if form2.get("n_30d", 0) >= FORM_MIN_MATCHES else form2.get("win_rate_60d")
-    if wr1 is None or wr2 is None:
-        return None
-    c1 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr1))
-    c2 = max(FORM_FLOOR, min(1 - FORM_FLOOR, wr2))
+    c1 = max(FORM_FLOOR, min(1 - FORM_FLOOR, c1))
+    c2 = max(FORM_FLOOR, min(1 - FORM_FLOOR, c2))
     ratio = c1 / (c1 + c2)
     return max(0.001, min(0.999, (1 - FORM_BLEND_WEIGHT) * comp_p1 + FORM_BLEND_WEIGHT * ratio))
 
@@ -637,11 +640,15 @@ def main():
         )
 
         form1 = form2 = None
+        qs1 = qs2 = None
         if _form_available:
             form1 = fetch_recent_form(p1_name)
             form2 = fetch_recent_form(p2_name)
+            _elo_map = elo_ratings
+            qs1 = _enrich_form_quality(form1, _elo_map.get(p1_name, ELO_START), _elo_map)
+            qs2 = _enrich_form_quality(form2, _elo_map.get(p2_name, ELO_START), _elo_map)
 
-        form_adj = form_blend(result["comp_p1"], form1, form2)
+        form_adj = form_blend(result["comp_p1"], form1, form2, qs1=qs1, qs2=qs2)
         display(p1_name, p2_name, surface_raw, result, market_p1, form1, form2, form_adj)
 
         again = input("Run another match? [y/n]: ").strip().lower()
